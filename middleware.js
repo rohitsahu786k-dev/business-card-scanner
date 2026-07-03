@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getToken } from 'next-auth/jwt';
+// import { getToken } from 'next-auth/jwt';
 
 export async function middleware(req) {
   try {
@@ -21,7 +21,8 @@ export async function middleware(req) {
       return NextResponse.next();
     }
 
-    const token = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
+    // const token = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
+    const token = null; // Temporary bypass for testing
 
     // Redirect unauthenticated users to login
     if (!token) {
