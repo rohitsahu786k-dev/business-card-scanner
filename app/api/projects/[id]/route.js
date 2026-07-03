@@ -6,21 +6,48 @@ import Project from '@/models/Project';
 import Contact from '@/models/Contact';
 
 export async function PUT(req, { params }) {
-  const session = await getServerSession(authOptions);
-  const { id } = await params;
-  await dbConnect();
-  const data = await req.json();
-  const project = await Project.findOneAndUpdate({ _id: id, userId: session.user.id }, data, { new: true });
-  if (!project) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  return NextResponse.json(project);
+  try {
+    const session = await getServerSession(authOptions);
+    if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const { id } = await params;
+    await dbConnect();
+    const data = await req.json();
+
+    // Prevent updating immutable _id field
+    const { _id, ...updateData } = data;
+
+    const project = await Project.findOneAndUpdate(
+      { _id: id, userId: session.user.id },
+      updateData,
+      { new: true }
+    );
+
+    if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+    return NextResponse.json(project);
+  } catch (error) {
+    console.error('Project PUT error:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 }
 
 export async function DELETE(req, { params }) {
-  const session = await getServerSession(authOptions);
-  const { id } = await params;
-  await dbConnect();
-  const project = await Project.findOneAndDelete({ _id: id, userId: session.user.id });
-  if (!project) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  await Contact.updateMany({ projectId: id }, { projectId: null });
-  return NextResponse.json({ message: 'Deleted' });
+  try {
+    const session = await getServerSession(authOptions);
+    if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const { id } = await params;
+    await dbConnect();
+
+    const project = await Project.findOneAndDelete({ _id: id, userId: session.user.id });
+    if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+
+    // Set contacts in this project to unorganized (projectId: null)
+    await Contact.updateMany({ projectId: id }, { projectId: null });
+
+    return NextResponse.json({ message: 'Deleted' });
+  } catch (error) {
+    console.error('Project DELETE error:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 }

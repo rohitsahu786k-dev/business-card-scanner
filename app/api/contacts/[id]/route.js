@@ -6,33 +6,57 @@ import Contact from '@/models/Contact';
 import { deleteImage } from '@/lib/cloudinary';
 
 export async function GET(req, { params }) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const { id } = await params;
-  await dbConnect();
-  const contact = await Contact.findOne({ _id: id, userId: session.user.id });
-  if (!contact) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  return NextResponse.json(contact);
+  try {
+    const session = await getServerSession(authOptions);
+    if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const { id } = await params;
+    await dbConnect();
+    const contact = await Contact.findOne({ _id: id, userId: session.user.id });
+    if (!contact) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+    return NextResponse.json(contact);
+  } catch (error) {
+    console.error('Contact GET error:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 }
 
 export async function PUT(req, { params }) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const { id } = await params;
-  await dbConnect();
-  const data = await req.json();
-  const contact = await Contact.findOneAndUpdate({ _id: id, userId: session.user.id }, data, { new: true });
-  if (!contact) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  return NextResponse.json(contact);
+  try {
+    const session = await getServerSession(authOptions);
+    if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const { id } = await params;
+    await dbConnect();
+    const data = await req.json();
+
+    // Prevent updating immutable _id field
+    const { _id, ...updateData } = data;
+
+    const contact = await Contact.findOneAndUpdate(
+      { _id: id, userId: session.user.id },
+      updateData,
+      { new: true }
+    );
+
+    if (!contact) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+    return NextResponse.json(contact);
+  } catch (error) {
+    console.error('Contact PUT error:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 }
 
 export async function DELETE(req, { params }) {
-  const session = await getServerSession(authOptions);
-  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  const { id } = await params;
-  await dbConnect();
-  const contact = await Contact.findOneAndDelete({ _id: id, userId: session.user.id });
-  if (!contact) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  if (contact.cardImagePublicId) await deleteImage(contact.cardImagePublicId);
-  return NextResponse.json({ message: 'Deleted' });
+  try {
+    const session = await getServerSession(authOptions);
+    if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const { id } = await params;
+    await dbConnect();
+    const contact = await Contact.findOneAndDelete({ _id: id, userId: session.user.id });
+    if (!contact) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+    if (contact.cardImagePublicId) await deleteImage(contact.cardImagePublicId);
+    return NextResponse.json({ message: 'Deleted' });
+  } catch (error) {
+    console.error('Contact DELETE error:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 }
