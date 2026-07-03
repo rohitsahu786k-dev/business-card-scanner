@@ -19,6 +19,7 @@ export default function Dashboard() {
   const [contacts, setContacts] = useState([]);
   const [projects, setProjects] = useState([]);
   const [users, setUsers] = useState([]); // Admin only
+  const [mediaItems, setMediaItems] = useState([]);
   const [loading, setLoading] = useState(true);
 
   // Filter state
@@ -30,6 +31,10 @@ export default function Dashboard() {
   const [editContact, setEditContact] = useState(null); // object to edit or empty object to create
   const [projectModal, setProjectModal] = useState(null); // object to edit or empty object to create
   const [adminUserModal, setAdminUserModal] = useState(null); // user to edit/create
+  const [mediaModal, setMediaModal] = useState(null); // media to edit/create
+  const [viewLightbox, setViewLightbox] = useState(null); // full-screen preview image
+  const [mediaSearchQuery, setMediaSearchQuery] = useState('');
+  const [mediaLoading, setMediaLoading] = useState(false);
   const [toolsModalOpen, setToolsModalOpen] = useState(false);
 
   // Camera & Scanner State
@@ -96,15 +101,94 @@ export default function Dashboard() {
     }
   };
 
+  const fetchMedia = async () => {
+    try {
+      const res = await fetch('/api/media');
+      if (res.ok) {
+        const data = await res.json();
+        setMediaItems(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch media:', err);
+    }
+  };
+
+  const handleSaveMedia = async (e) => {
+    e.preventDefault();
+    if (!mediaModal.title) {
+      showToast('Title is required', 'error');
+      return;
+    }
+    if (!mediaModal.id && !mediaModal.base64Data) {
+      showToast('Image file is required', 'error');
+      return;
+    }
+
+    setMediaLoading(true);
+    try {
+      const isEdit = !!mediaModal.id;
+      const url = isEdit ? `/api/media/${mediaModal.id}` : '/api/media';
+      const method = isEdit ? 'PUT' : 'POST';
+
+      const body = {
+        title: mediaModal.title,
+        contactId: mediaModal.contactId || '',
+      };
+      if (mediaModal.base64Data) {
+        body.base64Data = mediaModal.base64Data;
+      }
+
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (res.ok) {
+        showToast(isEdit ? 'Media updated successfully' : 'Media uploaded successfully');
+        setMediaModal(null);
+        fetchMedia();
+        fetchContacts();
+      } else {
+        const err = await res.json();
+        showToast(err.error || 'Failed to save media', 'error');
+      }
+    } catch (err) {
+      console.error(err);
+      showToast('Something went wrong', 'error');
+    } finally {
+      setMediaLoading(false);
+    }
+  };
+
+  const handleDeleteMedia = async (mediaId) => {
+    if (!confirm('Are you sure you want to delete this media file? This will remove it from storage and unlink any contact.')) return;
+
+    try {
+      const res = await fetch(`/api/media/${mediaId}`, { method: 'DELETE' });
+      if (res.ok) {
+        showToast('Media deleted successfully');
+        fetchMedia();
+        fetchContacts();
+      } else {
+        const err = await res.json();
+        showToast(err.error || 'Failed to delete media', 'error');
+      }
+    } catch (err) {
+      console.error(err);
+      showToast('Something went wrong', 'error');
+    }
+  };
+
   useEffect(() => {
     if (session) {
       setProfileName(session.user.name || '');
       setProfileEmail(session.user.email || '');
-      Promise.all([fetchContacts(), fetchProjects(), fetchUsers()]).finally(() => {
+      Promise.all([fetchContacts(), fetchProjects(), fetchUsers(), fetchMedia()]).finally(() => {
         setLoading(false);
       });
     }
-  }, [session, searchQuery, selectedProjectId, filterFavorite]);
+  }, [session, searchQuery, selectedProjectId, filterFavorite, activeTab]);
 
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
@@ -690,6 +774,11 @@ export default function Dashboard() {
             <span>Projects</span>
             <span className="badge">{projects.length}</span>
           </button>
+          <button className={`nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => { setActiveTab('media'); setMobileMenuOpen(false); }}>
+            <i className="fas fa-images"></i>
+            <span>Media Gallery</span>
+            <span className="badge">{mediaItems.length}</span>
+          </button>
           <button className={`nav-item ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => { setActiveTab('scan'); setMobileMenuOpen(false); startCamera(); }}>
             <i className="fas fa-expand"></i>
             <span>Scan Business Card</span>
@@ -740,6 +829,7 @@ export default function Dashboard() {
           <h1>
             {activeTab === 'contacts' && 'My Contacts'}
             {activeTab === 'projects' && 'Project Folders'}
+            {activeTab === 'media' && 'Media Gallery'}
             {activeTab === 'scan' && 'Scan Card'}
             {activeTab === 'profile' && 'My Profile'}
             {activeTab === 'admin' && 'Admin Console'}
@@ -766,6 +856,24 @@ export default function Dashboard() {
                 <button className="btn-sm btn-quick-scan" onClick={() => { setActiveTab('scan'); startCamera(); }}>
                   <i className="fas fa-camera"></i>
                   <span>Quick Scan</span>
+                </button>
+              </>
+            )}
+
+            {activeTab === 'media' && (
+              <>
+                <div className="header-search">
+                  <i className="fas fa-search"></i>
+                  <input
+                    type="text"
+                    placeholder="Search media files..."
+                    value={mediaSearchQuery}
+                    onChange={(e) => setMediaSearchQuery(e.target.value)}
+                  />
+                </div>
+                <button className="btn-sm" onClick={() => setMediaModal({ title: '', base64Data: '', contactId: '' })}>
+                  <i className="fas fa-upload"></i>
+                  <span>Upload Media</span>
                 </button>
               </>
             )}
@@ -852,6 +960,62 @@ export default function Dashboard() {
                           </div>
                         </div>
                       ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ============ MEDIA GALLERY TAB ============ */}
+              {activeTab === 'media' && (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                    <p style={{ color: 'var(--text2)', fontSize: '14px' }}>Browse, search, and manage all uploaded business card scans and media assets.</p>
+                    <button className="btn-sm" onClick={() => setMediaModal({ title: '', base64Data: '', contactId: '' })}>
+                      <i className="fas fa-plus"></i> Upload New Media
+                    </button>
+                  </div>
+
+                  {mediaItems.filter(item => item.title.toLowerCase().includes(mediaSearchQuery.toLowerCase())).length === 0 ? (
+                    <div className="empty-state">
+                      <div className="empty-icon"><i className="fas fa-images"></i></div>
+                      <h2>No media files found</h2>
+                      <p>Upload a new image file or scan a business card to populate the media library.</p>
+                      <button className="btn-primary" onClick={() => setMediaModal({ title: '', base64Data: '', contactId: '' })} style={{ maxWidth: '200px', margin: '0 auto' }}>
+                        <i className="fas fa-upload"></i> Upload Media
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="media-grid">
+                      {mediaItems
+                        .filter(item => item.title.toLowerCase().includes(mediaSearchQuery.toLowerCase()))
+                        .map(item => (
+                          <div key={item._id} className="media-card">
+                            <span className={`media-card-badge ${item.contactId ? 'linked' : ''}`}>
+                              {item.contactId ? `Linked: ${item.contactId.name || 'Contact'}` : 'Unlinked'}
+                            </span>
+                            <div className="media-card-img-container" onClick={() => setViewLightbox(item)} style={{ cursor: 'pointer' }}>
+                              <img src={item.url} alt={item.title} />
+                            </div>
+                            <div className="media-card-info">
+                              <h3 className="media-card-title">{item.title}</h3>
+                              <div className="media-card-meta">
+                                <span>{item.fileSize || 'Unknown Size'}</span>
+                                <span>{new Date(item.createdAt).toLocaleDateString()}</span>
+                              </div>
+                              <div className="media-card-actions">
+                                <button className="btn-view" onClick={() => setViewLightbox(item)} title="View Larger">
+                                  <i className="fas fa-search-plus"></i> View
+                                </button>
+                                <button className="btn-edit" onClick={() => setMediaModal({ id: item._id, title: item.title, url: item.url, contactId: item.contactId?._id || '' })} title="Edit details">
+                                  <i className="fas fa-pen"></i> Edit
+                                </button>
+                                <button className="btn-delete" onClick={() => handleDeleteMedia(item._id)} title="Delete File">
+                                  <i className="fas fa-trash"></i>
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
                     </div>
                   )}
                 </div>
@@ -1648,6 +1812,10 @@ export default function Dashboard() {
             <i className="fas fa-camera"></i>
           </div>
         </button>
+        <button className={`mobile-nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => setActiveTab('media')}>
+          <i className="fas fa-images"></i>
+          <span>Media</span>
+        </button>
         <button className={`mobile-nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => setActiveTab('profile')}>
           <i className="fas fa-user-circle"></i>
           <span>Profile</span>
@@ -1659,6 +1827,122 @@ export default function Dashboard() {
           </button>
         )}
       </nav>
+
+      {/* ============ MEDIA CREATE/EDIT MODAL ============ */}
+      {mediaModal && (
+        <div className="modal-overlay" onClick={() => setMediaModal(null)}>
+          <div className="modal-box" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px' }}>
+            <div className="modal-head">
+              <h2>{mediaModal.id ? 'Edit Media Details' : 'Upload New Media'}</h2>
+              <button className="close-btn" onClick={() => setMediaModal(null)}>
+                <i className="fas fa-times"></i>
+              </button>
+            </div>
+            <form onSubmit={handleSaveMedia}>
+              <div className="modal-body">
+                <div className="form-group">
+                  <label>Media Title</label>
+                  <input
+                    type="text"
+                    required
+                    value={mediaModal.title}
+                    onChange={e => setMediaModal({ ...mediaModal, title: e.target.value })}
+                    placeholder="e.g. Acme Corp Business Card"
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label>File Upload</label>
+                  {mediaModal.base64Data || mediaModal.url ? (
+                    <div style={{ position: 'relative', marginBottom: '12px' }}>
+                      <img
+                        src={mediaModal.base64Data || mediaModal.url}
+                        alt="Preview"
+                        style={{ width: '100%', height: '180px', objectFit: 'contain', borderRadius: '8px', border: '1px solid #eef2f6', background: '#f8f9fb' }}
+                      />
+                      <button
+                        type="button"
+                        className="btn-sm"
+                        style={{ position: 'absolute', bottom: '8px', right: '8px', background: 'rgba(0,0,0,0.6)', color: '#fff', border: 'none' }}
+                        onClick={() => document.getElementById('mediaModalFileInput').click()}
+                      >
+                        <i className="fas fa-camera" style={{ marginRight: '4px' }}></i> Replace Image
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      className="file-dropzone"
+                      onClick={() => document.getElementById('mediaModalFileInput').click()}
+                      style={{ border: '2px dashed #e2e8f0', borderRadius: '12px', padding: '32px', textAlign: 'center', cursor: 'pointer', background: '#f8fafc' }}
+                    >
+                      <i className="fas fa-cloud-upload-alt" style={{ fontSize: '32px', color: 'var(--red)', marginBottom: '8px' }}></i>
+                      <p style={{ margin: 0, fontWeight: 500 }}>Click to upload an image</p>
+                      <p style={{ margin: '4px 0 0', fontSize: '12px', color: '#94a3b8' }}>PNG, JPG or WEBP formats</p>
+                    </div>
+                  )}
+                  <input
+                    type="file"
+                    id="mediaModalFileInput"
+                    accept="image/*"
+                    style={{ display: 'none' }}
+                    onChange={e => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const reader = new FileReader();
+                        reader.onloadend = () => {
+                          setMediaModal({
+                            ...mediaModal,
+                            title: mediaModal.title || file.name.substring(0, file.name.lastIndexOf('.')),
+                            base64Data: reader.result
+                          });
+                        };
+                        reader.readAsDataURL(file);
+                      }
+                    }}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label>Link to Contact (Optional)</label>
+                  <select
+                    value={mediaModal.contactId || ''}
+                    onChange={e => setMediaModal({ ...mediaModal, contactId: e.target.value })}
+                  >
+                    <option value="">-- No Linked Contact --</option>
+                    {contacts.map(c => (
+                      <option key={c._id} value={c._id}>{c.name} {c.company ? `(${c.company})` : ''}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="modal-footer">
+                <button type="button" className="btn-outline" onClick={() => setMediaModal(null)}>Cancel</button>
+                <button type="submit" className="btn-primary" disabled={mediaLoading}>
+                  {mediaLoading ? (
+                    <div className="spinner" style={{ width: '18px', height: '18px', borderTopColor: 'transparent', borderColor: '#fff' }}></div>
+                  ) : (
+                    mediaModal.id ? 'Save Changes' : 'Upload'
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ============ LIGHTBOX PREVIEW ============ */}
+      {viewLightbox && (
+        <div className="lightbox-overlay" onClick={() => setViewLightbox(null)}>
+          <div className="lightbox-content" onClick={e => e.stopPropagation()}>
+            <button className="lightbox-close" onClick={() => setViewLightbox(null)}>
+              <i className="fas fa-times"></i>
+            </button>
+            <img src={viewLightbox.url} alt={viewLightbox.title} className="lightbox-img" />
+            <div className="lightbox-title">{viewLightbox.title}</div>
+          </div>
+        </div>
+      )}
 
       {/* Invisible Canvas for camera snapshots */}
       <canvas ref={canvasRef} style={{ display: 'none' }}></canvas>
