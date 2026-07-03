@@ -1,0 +1,16 @@
+{
+  "appId": "com.onepws.cardscan",
+  "appName": "OnePWS CardScan",
+  "webDir": "out",
+  "bundledWebRuntime": false,
+  "server": {
+    "url": "https://scanner.onepws.com",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true
+  },
+  "ios": {
+    "contentInset": "always"
+  }
+}
