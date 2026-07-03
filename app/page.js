@@ -617,15 +617,15 @@ export default function Dashboard() {
       <main className="main-content">
         {/* Top Header */}
         <header className="top-header">
-          <button className="mobile-toggle" onClick={() => setMobileMenuOpen(true)}>
-            <i className="fas fa-bars"></i>
-          </button>
+          <div className="header-brand-mobile">
+            <img src="/assets/logo-icon.png" alt="OnePWS logo" className="mobile-logo-icon" />
+          </div>
 
           <h1>
             {activeTab === 'contacts' && 'My Contacts'}
             {activeTab === 'projects' && 'Project Folders'}
-            {activeTab === 'scan' && 'Scan Business Card'}
-            {activeTab === 'profile' && 'Profile Management'}
+            {activeTab === 'scan' && 'Scan Card'}
+            {activeTab === 'profile' && 'My Profile'}
             {activeTab === 'admin' && 'Admin Console'}
           </h1>
 
@@ -647,7 +647,7 @@ export default function Dashboard() {
                 <button className="icon-btn" onClick={() => setToolsModalOpen(true)} title="Import / Export Data">
                   <i className="fas fa-file-import"></i>
                 </button>
-                <button className="btn-sm" onClick={() => { setActiveTab('scan'); startCamera(); }}>
+                <button className="btn-sm btn-quick-scan" onClick={() => { setActiveTab('scan'); startCamera(); }}>
                   <i className="fas fa-camera"></i>
                   <span>Quick Scan</span>
                 </button>
@@ -1367,6 +1367,33 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* Mobile Bottom Navigation Bar */}
+      <nav className="mobile-bottom-nav">
+        <button className={`mobile-nav-item ${activeTab === 'contacts' ? 'active' : ''}`} onClick={() => setActiveTab('contacts')}>
+          <i className="fas fa-address-book"></i>
+          <span>Contacts</span>
+        </button>
+        <button className={`mobile-nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => setActiveTab('projects')}>
+          <i className="fas fa-folder"></i>
+          <span>Projects</span>
+        </button>
+        <button className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => { setActiveTab('scan'); startCamera(); }}>
+          <div className="scan-btn-inner">
+            <i className="fas fa-camera"></i>
+          </div>
+        </button>
+        <button className={`mobile-nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => setActiveTab('profile')}>
+          <i className="fas fa-user-circle"></i>
+          <span>Profile</span>
+        </button>
+        {session && session.user && session.user.role === 'admin' && (
+          <button className={`mobile-nav-item ${activeTab === 'admin' ? 'active' : ''}`} onClick={() => setActiveTab('admin')}>
+            <i className="fas fa-shield-halved"></i>
+            <span>Admin</span>
+          </button>
+        )}
+      </nav>
 
       {/* Invisible Canvas for camera snapshots */}
       <canvas ref={canvasRef} style={{ display: 'none' }}></canvas>

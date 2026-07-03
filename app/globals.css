@@ -68,6 +68,7 @@ input,textarea,select{font-family:inherit}
 .top-header{display:flex;align-items:center;justify-content:space-between;padding:16px 28px;background:#fff;border-bottom:1px solid var(--border);position:sticky;top:0;z-index:50}
 .top-header h1{font-size:22px;font-weight:700}
 .top-header-actions{display:flex;align-items:center;gap:10px}
+.top-header-actions:empty{display:none!important}
 .header-search{position:relative}
 .header-search input{padding:9px 14px 9px 36px;background:var(--bg-input);border:1.5px solid var(--border);border-radius:var(--radius-xs);font-size:13px;width:260px;outline:none;transition:var(--transition);color:var(--text)}
 .header-search input:focus{border-color:var(--red);box-shadow:0 0 0 3px var(--red-glow);width:320px}
@@ -211,25 +212,198 @@ input,textarea,select{font-family:inherit}
 @keyframes scaleIn{from{opacity:0;transform:scale(.95)}to{opacity:1;transform:none}}
 @keyframes spin{to{transform:rotate(360deg)}}
 
-/* Responsive */
-@media(max-width:768px){
-  .sidebar{transform:translateX(-100%)}
-  .sidebar.open{transform:none}
-  .sidebar-overlay.open{display:block}
-  .main-content{margin-left:0}
-  .mobile-toggle{display:flex;align-items:center;justify-content:center}
-  .top-header{padding:12px 16px}
-  .page-content{padding:16px}
-  .stats-row{grid-template-columns:repeat(2,1fr)}
-  .header-search input{width:180px}
-  .header-search input:focus{width:200px}
-  .tools-grid{grid-template-columns:repeat(2,1fr)}
-  .modal-box{margin:10px;max-height:95dvh;border-radius:16px}
+/* Table wrap responsive scrolling */
+.table-wrap {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
+
+/* Header brand layout defaults */
+.header-brand-mobile {
+  display: none;
+}
+.mobile-logo-icon {
+  height: 28px;
+  object-fit: contain;
+}
+
+/* Mobile Bottom Navigation Bar (Hidden by default on desktop) */
+.mobile-bottom-nav {
+  display: none;
+}
+
+/* Responsive Styles for Tablet & Mobile */
+@media(max-width:768px){
+  /* Hide desktop sidebar elements completely */
+  .sidebar {
+    display: none !important;
+  }
+  .sidebar-overlay {
+    display: none !important;
+  }
+  .mobile-toggle {
+    display: none !important;
+  }
+  
+  .main-content {
+    margin-left: 0 !important;
+    padding-bottom: 74px; /* Extra padding for mobile bottom nav */
+  }
+  
+  /* Mobile header layout - wraps to two rows: Row 1 brand/actions, Row 2 search */
+  .top-header {
+    padding: 16px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  
+  .top-header h1 {
+    font-size: 22px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+  }
+  
+  .header-brand-mobile {
+    display: flex;
+    align-items: center;
+  }
+  
+  .top-header-actions {
+    display: flex;
+    gap: 8px;
+    width: 100%;
+    align-items: center;
+  }
+  
+  /* Make the search bar span all available space next to control buttons */
+  .header-search {
+    flex: 1;
+    margin: 0;
+  }
+  
+  .header-search input {
+    width: 100% !important;
+    font-size: 14px;
+    padding: 10px 14px 10px 40px;
+  }
+  
+  .header-search i {
+    left: 14px;
+  }
+  
+  /* Hide quick scan in header on mobile since scan button is in bottom nav */
+  .btn-quick-scan {
+    display: none !important;
+  }
+  
+  .page-content {
+    padding: 16px;
+  }
+  
+  .stats-row {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  
+  .tools-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  
+  .modal-box {
+    margin: 10px;
+    max-height: 95dvh;
+    border-radius: 16px;
+  }
+  
+  /* Mobile Bottom Navigation Bar styling */
+  .mobile-bottom-nav {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 64px;
+    background: #ffffff;
+    border-top: 1px solid var(--border);
+    justify-content: space-around;
+    align-items: center;
+    z-index: 999;
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.05);
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+  
+  .mobile-nav-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    color: var(--text2);
+    font-size: 10px;
+    font-weight: 500;
+    flex: 1;
+    gap: 4px;
+    height: 100%;
+    transition: var(--transition);
+  }
+  
+  .mobile-nav-item i {
+    font-size: 18px;
+  }
+  
+  .mobile-nav-item.active {
+    color: var(--red);
+    font-weight: 600;
+  }
+  
+  /* Prominent centered scan action button */
+  .mobile-nav-item.scan-btn {
+    position: relative;
+    top: -12px;
+    overflow: visible;
+  }
+  
+  .scan-btn-inner {
+    width: 52px;
+    height: 52px;
+    background: var(--red);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 14px rgba(230, 50, 50, 0.4);
+    transition: var(--transition);
+  }
+  
+  .scan-btn-inner i {
+    color: #ffffff;
+    font-size: 20px;
+  }
+  
+  .mobile-nav-item.scan-btn:active .scan-btn-inner {
+    transform: scale(0.9);
+  }
+  
+  .mobile-nav-item.scan-btn.active .scan-btn-inner {
+    background: var(--red-hover);
+    box-shadow: 0 4px 16px rgba(230, 50, 50, 0.6);
+  }
+}
+
 @media(max-width:480px){
-  .stats-row{grid-template-columns:1fr}
-  .header-search{display:none}
-  .auth-card{padding:28px 20px}
+  .stats-row {
+    grid-template-columns: 1fr;
+  }
+  .auth-card {
+    padding: 28px 20px;
+  }
 }
 
 /* Scrollbar */
