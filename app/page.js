@@ -59,6 +59,9 @@ export default function Dashboard() {
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showAdminUserPassword, setShowAdminUserPassword] = useState(false);
+  const [mediaFilter, setMediaFilter] = useState('all');
+  const [mediaSort, setMediaSort] = useState('newest');
+  const [mediaDensity, setMediaDensity] = useState('standard');
 
   // ---------------- FETCHING DATA ----------------
   const fetchContacts = async () => {
@@ -967,29 +970,182 @@ export default function Dashboard() {
               )}
 
               {/* ============ MEDIA GALLERY TAB ============ */}
-              {activeTab === 'media' && (
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                    <p style={{ color: 'var(--text2)', fontSize: '14px' }}>Browse, search, and manage all uploaded business card scans and media assets.</p>
-                    <button className="btn-sm" onClick={() => setMediaModal({ title: '', base64Data: '', contactId: '' })}>
-                      <i className="fas fa-plus"></i> Upload New Media
-                    </button>
-                  </div>
+              {activeTab === 'media' && (() => {
+                // Calculate filtered and sorted items dynamically
+                let items = mediaItems.filter(item => item.title.toLowerCase().includes(mediaSearchQuery.toLowerCase()));
 
-                  {mediaItems.filter(item => item.title.toLowerCase().includes(mediaSearchQuery.toLowerCase())).length === 0 ? (
-                    <div className="empty-state">
-                      <div className="empty-icon"><i className="fas fa-images"></i></div>
-                      <h2>No media files found</h2>
-                      <p>Upload a new image file or scan a business card to populate the media library.</p>
-                      <button className="btn-primary" onClick={() => setMediaModal({ title: '', base64Data: '', contactId: '' })} style={{ maxWidth: '200px', margin: '0 auto' }}>
-                        <i className="fas fa-upload"></i> Upload Media
+                if (mediaFilter === 'linked') {
+                  items = items.filter(item => !!item.contactId);
+                } else if (mediaFilter === 'unlinked') {
+                  items = items.filter(item => !item.contactId);
+                }
+
+                items.sort((a, b) => {
+                  if (mediaSort === 'newest') return new Date(b.createdAt) - new Date(a.createdAt);
+                  if (mediaSort === 'oldest') return new Date(a.createdAt) - new Date(b.createdAt);
+                  if (mediaSort === 'title') return a.title.localeCompare(b.title);
+                  if (mediaSort === 'size') {
+                    const parseSizeToBytes = (sizeStr) => {
+                      if (!sizeStr) return 0;
+                      const clean = sizeStr.toLowerCase().trim();
+                      const num = parseFloat(clean);
+                      if (isNaN(num)) return 0;
+                      if (clean.includes('gb') || clean.includes('g')) return num * 1024 * 1024 * 1024;
+                      if (clean.includes('mb') || clean.includes('m')) return num * 1024 * 1024;
+                      if (clean.includes('kb') || clean.includes('k')) return num * 1024;
+                      return num;
+                    };
+                    return parseSizeToBytes(b.fileSize) - parseSizeToBytes(a.fileSize);
+                  }
+                  return 0;
+                });
+
+                return (
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '10px' }}>
+                      <p style={{ color: 'var(--text2)', fontSize: '14px', margin: 0 }}>Browse, search, and manage all uploaded business card scans and media assets.</p>
+                      <button className="btn-sm" onClick={() => setMediaModal({ title: '', base64Data: '', contactId: '' })}>
+                        <i className="fas fa-plus"></i> Upload New Media
                       </button>
                     </div>
-                  ) : (
-                    <div className="media-grid">
-                      {mediaItems
-                        .filter(item => item.title.toLowerCase().includes(mediaSearchQuery.toLowerCase()))
-                        .map(item => (
+
+                    {/* Media Controls Toolbar */}
+                    <div className="media-toolbar" style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: '12px',
+                      alignItems: 'center',
+                      marginBottom: '20px',
+                      background: '#f8fafc',
+                      padding: '12px',
+                      borderRadius: '12px',
+                      border: '1px solid var(--border)'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: '1 1 200px' }}>
+                        <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)', whiteSpace: 'nowrap' }}>Search:</label>
+                        <div className="input-wrap" style={{ margin: 0, width: '100%', position: 'relative' }}>
+                          <i className="fas fa-search field-icon" style={{ left: '12px', position: 'absolute', top: '50%', transform: 'translateY(-50%)', color: 'var(--text3)' }}></i>
+                          <input
+                            type="text"
+                            placeholder="Search media files..."
+                            value={mediaSearchQuery}
+                            onChange={(e) => setMediaSearchQuery(e.target.value)}
+                            style={{ paddingLeft: '32px', height: '36px', fontSize: '13px', borderRadius: '8px', border: '1px solid var(--border)', width: '100%', outline: 'none' }}
+                          />
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', alignItems: 'center', flex: '999 1 auto', justifyContent: 'flex-end' }}>
+                        {/* Link Filter */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)' }}>Filter:</label>
+                          <select
+                            value={mediaFilter}
+                            onChange={(e) => setMediaFilter(e.target.value)}
+                            style={{ height: '36px', padding: '0 10px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '13px', background: '#fff', cursor: 'pointer', outline: 'none' }}
+                          >
+                            <option value="all">All Assets</option>
+                            <option value="linked">Linked Only</option>
+                            <option value="unlinked">Unlinked Only</option>
+                          </select>
+                        </div>
+
+                        {/* Sort Selector */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)' }}>Sort:</label>
+                          <select
+                            value={mediaSort}
+                            onChange={(e) => setMediaSort(e.target.value)}
+                            style={{ height: '36px', padding: '0 10px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '13px', background: '#fff', cursor: 'pointer', outline: 'none' }}
+                          >
+                            <option value="newest">Newest First</option>
+                            <option value="oldest">Oldest First</option>
+                            <option value="title">Name (A-Z)</option>
+                            <option value="size">File Size</option>
+                          </select>
+                        </div>
+
+                        {/* Layout Density */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)' }}>View:</label>
+                          <div style={{ display: 'flex', background: '#e2e8f0', padding: '3px', borderRadius: '8px', gap: '2px' }}>
+                            <button
+                              type="button"
+                              onClick={() => setMediaDensity('standard')}
+                              style={{
+                                border: 'none',
+                                background: mediaDensity === 'standard' ? '#fff' : 'transparent',
+                                color: mediaDensity === 'standard' ? 'var(--red)' : '#64748b',
+                                padding: '6px 10px',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                fontSize: '12px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                fontWeight: mediaDensity === 'standard' ? '600' : '400'
+                              }}
+                              title="Standard Grid"
+                            >
+                              <i className="fas fa-th-large"></i>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setMediaDensity('compact')}
+                              style={{
+                                border: 'none',
+                                background: mediaDensity === 'compact' ? '#fff' : 'transparent',
+                                color: mediaDensity === 'compact' ? 'var(--red)' : '#64748b',
+                                padding: '6px 10px',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                fontSize: '12px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                fontWeight: mediaDensity === 'compact' ? '600' : '400'
+                              }}
+                              title="Compact Grid"
+                            >
+                              <i className="fas fa-th"></i>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setMediaDensity('list')}
+                              style={{
+                                border: 'none',
+                                background: mediaDensity === 'list' ? '#fff' : 'transparent',
+                                color: mediaDensity === 'list' ? 'var(--red)' : '#64748b',
+                                padding: '6px 10px',
+                                borderRadius: '6px',
+                                cursor: 'pointer',
+                                fontSize: '12px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                fontWeight: mediaDensity === 'list' ? '600' : '400'
+                              }}
+                              title="List View"
+                            >
+                              <i className="fas fa-list"></i>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {items.length === 0 ? (
+                      <div className="empty-state">
+                        <div className="empty-icon"><i className="fas fa-images"></i></div>
+                        <h2>No media files found</h2>
+                        <p>No media files match your filter or search query. Try uploading or changing filters.</p>
+                        <button className="btn-primary" onClick={() => setMediaModal({ title: '', base64Data: '', contactId: '' })} style={{ maxWidth: '200px', margin: '0 auto' }}>
+                          <i className="fas fa-upload"></i> Upload Media
+                        </button>
+                      </div>
+                    ) : (
+                      <div className={`media-grid ${mediaDensity}`}>
+                        {items.map(item => (
                           <div key={item._id} className="media-card">
                             <span className={`media-card-badge ${item.contactId ? 'linked' : ''}`}>
                               {item.contactId ? `Linked: ${item.contactId.name || 'Contact'}` : 'Unlinked'}
@@ -998,7 +1154,7 @@ export default function Dashboard() {
                               <img src={item.url} alt={item.title} />
                             </div>
                             <div className="media-card-info">
-                              <h3 className="media-card-title">{item.title}</h3>
+                              <h3 className="media-card-title" title={item.title}>{item.title}</h3>
                               <div className="media-card-meta">
                                 <span>{item.fileSize || 'Unknown Size'}</span>
                                 <span>{new Date(item.createdAt).toLocaleDateString()}</span>
@@ -1017,10 +1173,11 @@ export default function Dashboard() {
                             </div>
                           </div>
                         ))}
-                    </div>
-                  )}
-                </div>
-              )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* ============ PROJECTS TAB ============ */}
               {activeTab === 'projects' && (
@@ -1270,6 +1427,15 @@ export default function Dashboard() {
               {/* ============ PROFILE TAB ============ */}
               {activeTab === 'profile' && (
                 <div style={{ maxWidth: '600px', margin: '0 auto' }}>
+                  {session && session.user && session.user.role === 'admin' && (
+                    <div className="profile-section" style={{ borderLeft: '4px solid var(--red)', background: 'rgba(230, 50, 50, 0.02)', marginBottom: '20px' }}>
+                      <h3 style={{ color: 'var(--red)', display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}><i className="fas fa-shield-halved"></i> Admin Console Access</h3>
+                      <p style={{ fontSize: '12px', color: 'var(--text2)', margin: '8px 0 12px' }}>You have administrator privileges. Use the button below to manage user accounts and view system settings.</p>
+                      <button className="btn-primary" onClick={() => setActiveTab('admin')} style={{ width: '100%', padding: '10px', background: 'var(--red)' }}>
+                        <i className="fas fa-cog"></i> Open Admin Console
+                      </button>
+                    </div>
+                  )}
                   <div className="profile-section">
                     <h3><i className="fas fa-id-badge"></i> Profile Details</h3>
                     <div className="avatar-upload">
@@ -1833,12 +1999,6 @@ export default function Dashboard() {
           <i className="fas fa-user-circle"></i>
           <span>Profile</span>
         </button>
-        {session && session.user && session.user.role === 'admin' && (
-          <button className={`mobile-nav-item ${activeTab === 'admin' ? 'active' : ''}`} onClick={() => setActiveTab('admin')}>
-            <i className="fas fa-shield-halved"></i>
-            <span>Admin</span>
-          </button>
-        )}
       </nav>
 
       {/* ============ MEDIA CREATE/EDIT MODAL ============ */}
