@@ -92,6 +92,14 @@ function ResetPasswordForm() {
             onChange={(e) => setConfirmPassword(e.target.value)}
             required
           />
+          <button
+            type="button"
+            className="pass-toggle"
+            onClick={() => setShowPassword(!showPassword)}
+            tabIndex="-1"
+          >
+            <i className={`fas ${showPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
+          </button>
         </div>
       </div>
 

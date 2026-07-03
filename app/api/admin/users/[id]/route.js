@@ -18,7 +18,8 @@ export async function PUT(req, { params }) {
   if (data.email) update.email = data.email.toLowerCase();
   if (data.role) update.role = data.role;
   if (data.password) update.password = await bcrypt.hash(data.password, 12);
-  const user = await User.findByIdAndUpdate(params.id, update, { new: true }).select('-password');
+  const { id } = await params;
+  const user = await User.findByIdAndUpdate(id, update, { new: true }).select('-password');
   if (!user) return NextResponse.json({ error: 'User not found' }, { status: 404 });
   return NextResponse.json(user);
 }
@@ -29,8 +30,9 @@ export async function DELETE(req, { params }) {
   await dbConnect();
   const admin = await User.findById(session.user.id);
   if (!admin || admin.role !== 'admin') return NextResponse.json({ error: 'Admin access required' }, { status: 403 });
-  if (params.id === session.user.id) return NextResponse.json({ error: 'Cannot delete yourself' }, { status: 400 });
-  await Contact.deleteMany({ userId: params.id });
-  await User.findByIdAndDelete(params.id);
+  const { id } = await params;
+  if (id === session.user.id) return NextResponse.json({ error: 'Cannot delete yourself' }, { status: 400 });
+  await Contact.deleteMany({ userId: id });
+  await User.findByIdAndDelete(id);
   return NextResponse.json({ message: 'User deleted' });
 }

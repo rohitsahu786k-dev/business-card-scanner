@@ -253,49 +253,79 @@ input,textarea,select{font-family:inherit}
     padding-bottom: 74px; /* Extra padding for mobile bottom nav */
   }
   
-  /* Mobile header layout - wraps to two rows: Row 1 brand/actions, Row 2 search */
+  /* Mobile header layout - Short & Sticky Glassmorphic Header */
   .top-header {
-    padding: 16px;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 12px;
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 1000 !important;
+    background: rgba(255, 255, 255, 0.85) !important;
+    backdrop-filter: blur(12px) !important;
+    -webkit-backdrop-filter: blur(12px) !important;
+    border-bottom: 1px solid rgba(226, 232, 240, 0.8) !important;
+    padding: 8px 16px !important;
+    height: 56px !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 8px !important;
   }
   
   .top-header h1 {
-    font-size: 22px;
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
+    display: none !important; /* Hide page title text on mobile to save space */
   }
   
   .header-brand-mobile {
-    display: flex;
+    display: flex !important;
     align-items: center;
+  }
+
+  .mobile-logo-full {
+    height: 26px;
+    width: auto;
+    object-fit: contain;
   }
   
   .top-header-actions {
-    display: flex;
-    gap: 8px;
-    width: 100%;
-    align-items: center;
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 6px !important;
+    width: auto !important;
+    flex: 1 !important;
+    justify-content: flex-end !important;
   }
   
   /* Make the search bar span all available space next to control buttons */
   .header-search {
-    flex: 1;
-    margin: 0;
+    flex: 1 !important;
+    max-width: 140px !important;
+    margin: 0 !important;
   }
   
   .header-search input {
     width: 100% !important;
-    font-size: 14px;
-    padding: 10px 14px 10px 40px;
+    padding: 6px 10px 6px 30px !important;
+    font-size: 13px !important;
+    height: 34px !important;
+    border-radius: 20px !important;
   }
   
   .header-search i {
-    left: 14px;
+    left: 10px !important;
+    font-size: 12px !important;
+  }
+  
+  .top-header-actions .icon-btn {
+    width: 34px !important;
+    height: 34px !important;
+    min-width: 34px !important;
+    font-size: 13px !important;
+    border-radius: 50% !important;
+    background: #f8fafc !important;
+    border: 1px solid #e2e8f0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
   }
   
   /* Hide quick scan in header on mobile since scan button is in bottom nav */
@@ -321,20 +351,24 @@ input,textarea,select{font-family:inherit}
     border-radius: 16px;
   }
   
-  /* Mobile Bottom Navigation Bar styling */
+  /* Mobile Bottom Navigation Bar styling - Advanced Floating Dock */
   .mobile-bottom-nav {
     display: flex;
     position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
+    bottom: 12px;
+    left: 12px;
+    right: 12px;
     height: 64px;
-    background: #ffffff;
-    border-top: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.88);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(226, 232, 240, 0.8);
+    border-radius: 20px;
     justify-content: space-around;
     align-items: center;
     z-index: 999;
-    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.05);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
+    padding: 0 8px;
     padding-bottom: env(safe-area-inset-bottom, 0);
   }
   
@@ -345,17 +379,19 @@ input,textarea,select{font-family:inherit}
     justify-content: center;
     background: none;
     border: none;
-    color: var(--text2);
+    color: #64748b;
     font-size: 10px;
     font-weight: 500;
     flex: 1;
-    gap: 4px;
+    gap: 3px;
     height: 100%;
-    transition: var(--transition);
+    transition: all 0.2s ease;
+    position: relative;
   }
   
   .mobile-nav-item i {
-    font-size: 18px;
+    font-size: 20px;
+    transition: transform 0.2s ease;
   }
   
   .mobile-nav-item.active {
@@ -363,23 +399,44 @@ input,textarea,select{font-family:inherit}
     font-weight: 600;
   }
   
+  .mobile-nav-item.active i {
+    transform: translateY(-2px);
+  }
+  
+  .mobile-nav-item::after {
+    content: '';
+    position: absolute;
+    bottom: 6px;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--red);
+    transform: scale(0);
+    transition: transform 0.2s ease;
+  }
+  
+  .mobile-nav-item.active::after {
+    transform: scale(1);
+  }
+  
   /* Prominent centered scan action button */
   .mobile-nav-item.scan-btn {
     position: relative;
-    top: -12px;
+    top: -18px;
     overflow: visible;
   }
   
   .scan-btn-inner {
-    width: 52px;
-    height: 52px;
-    background: var(--red);
+    width: 56px;
+    height: 56px;
+    background: linear-gradient(135deg, var(--red) 0%, #ff4d4d 100%);
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 4px 14px rgba(230, 50, 50, 0.4);
-    transition: var(--transition);
+    box-shadow: 0 8px 20px rgba(230, 50, 50, 0.4);
+    transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    border: 4px solid #ffffff;
   }
   
   .scan-btn-inner i {
@@ -388,12 +445,13 @@ input,textarea,select{font-family:inherit}
   }
   
   .mobile-nav-item.scan-btn:active .scan-btn-inner {
-    transform: scale(0.9);
+    transform: scale(0.9) translateY(4px);
+    box-shadow: 0 4px 10px rgba(230, 50, 50, 0.3);
   }
   
   .mobile-nav-item.scan-btn.active .scan-btn-inner {
     background: var(--red-hover);
-    box-shadow: 0 4px 16px rgba(230, 50, 50, 0.6);
+    transform: rotate(45deg);
   }
 }
 

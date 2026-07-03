@@ -58,6 +58,7 @@ export default function Dashboard() {
   const [isBulkProcessing, setIsBulkProcessing] = useState(false);
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showAdminUserPassword, setShowAdminUserPassword] = useState(false);
 
   // ---------------- FETCHING DATA ----------------
   const fetchContacts = async () => {
@@ -823,7 +824,7 @@ export default function Dashboard() {
         {/* Top Header */}
         <header className="top-header">
           <div className="header-brand-mobile">
-            <img src="/assets/logo-icon.png" alt="OnePWS logo" className="mobile-logo-icon" />
+            <img src="/assets/logo-full.png" alt="OnePWS logo" className="mobile-logo-full" />
           </div>
 
           <h1>
@@ -1718,15 +1719,27 @@ export default function Dashboard() {
                     required
                   />
                 </div>
-                <div className="form-group">
+                 <div className="form-group">
                   <label>Password {adminUserModal._id && '(Leave blank to keep unchanged)'}</label>
-                  <input
-                    type="password"
-                    placeholder="••••••••"
-                    value={adminUserModal.password || ''}
-                    onChange={e => setAdminUserModal({ ...adminUserModal, password: e.target.value })}
-                    required={!adminUserModal._id}
-                  />
+                  <div className="input-wrap">
+                    <i className="fas fa-lock field-icon"></i>
+                    <input
+                      type={showAdminUserPassword ? 'text' : 'password'}
+                      placeholder="••••••••"
+                      value={adminUserModal.password || ''}
+                      onChange={e => setAdminUserModal({ ...adminUserModal, password: e.target.value })}
+                      required={!adminUserModal._id}
+                      style={{ paddingLeft: '40px', paddingRight: '40px' }}
+                    />
+                    <button
+                      type="button"
+                      className="pass-toggle"
+                      onClick={() => setShowAdminUserPassword(!showAdminUserPassword)}
+                      tabIndex="-1"
+                    >
+                      <i className={`fas ${showAdminUserPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
+                    </button>
+                  </div>
                 </div>
                 <div className="form-group">
                   <label>System Role</label>

@@ -10,7 +10,7 @@ export async function PUT(req, { params }) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const { id } = params;
+  const { id } = await params;
   const { title, base64Data, contactId } = await req.json();
 
   await dbConnect();
@@ -76,7 +76,7 @@ export async function DELETE(req, { params }) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const { id } = params;
+  const { id } = await params;
   await dbConnect();
 
   const media = await Media.findOne({ _id: id, userId: session.user.id });
