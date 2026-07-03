@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import bcrypt from 'bcryptjs';
 import dbConnect from '@/lib/mongodb';
 import User from '@/models/User';
+import { sendWelcomeEmail } from '@/lib/email';
 
 export async function POST(req) {
   try {
@@ -13,7 +14,15 @@ export async function POST(req) {
     if (exists) return NextResponse.json({ error: 'Email already registered' }, { status: 400 });
     const hashed = await bcrypt.hash(password, 12);
     const userCount = await User.countDocuments();
-    await User.create({ name, email: email.toLowerCase(), password: hashed, role: userCount === 0 ? 'admin' : 'user' });
+    const user = await User.create({ name, email: email.toLowerCase(), password: hashed, role: userCount === 0 ? 'admin' : 'user' });
+    
+    // Send welcome email
+    try {
+      await sendWelcomeEmail(user.email, user.name);
+    } catch (err) {
+      console.error('Failed to send welcome email:', err);
+    }
+
     return NextResponse.json({ message: 'Account created successfully' });
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });

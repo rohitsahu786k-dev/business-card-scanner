@@ -40,6 +40,7 @@ export default function Dashboard() {
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
   const importFileInputRef = useRef(null);
+  const bulkFileInputRef = useRef(null);
 
   // Profile Edit State
   const [profileName, setProfileName] = useState('');
@@ -47,6 +48,11 @@ export default function Dashboard() {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [profileLoading, setProfileLoading] = useState(false);
+  const [scanMode, setScanMode] = useState('single'); // single | bulk
+  const [bulkQueue, setBulkQueue] = useState([]); // { id, name, preview, status, progress, parsedData, error }
+  const [isBulkProcessing, setIsBulkProcessing] = useState(false);
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
 
   // ---------------- FETCHING DATA ----------------
   const fetchContacts = async () => {
@@ -167,6 +173,116 @@ export default function Dashboard() {
 
   const triggerScanUpload = () => {
     fileInputRef.current?.click();
+  };
+
+  const triggerBulkUpload = () => {
+    bulkFileInputRef.current?.click();
+  };
+
+  const handleBulkFileSelect = (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    const newQueueItems = [];
+    let loadedCount = 0;
+
+    files.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        newQueueItems.push({
+          id: Math.random().toString(36).substring(2, 9),
+          name: file.name,
+          preview: event.target.result,
+          status: 'queued', // queued | scanning | saving | success | failed
+          progress: 0,
+          parsedData: null,
+          error: null
+        });
+
+        loadedCount++;
+        if (loadedCount === files.length) {
+          setBulkQueue((prev) => [...prev, ...newQueueItems]);
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+
+    e.target.value = '';
+  };
+
+  const handleProcessBulkQueue = async () => {
+    if (isBulkProcessing || bulkQueue.length === 0) return;
+    setIsBulkProcessing(true);
+
+    const items = [...bulkQueue];
+
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].status !== 'queued' && items[i].status !== 'failed') continue;
+
+      // Mark as scanning
+      items[i].status = 'scanning';
+      setBulkQueue([...items]);
+
+      try {
+        // 1. Scan image with AI
+        const scanRes = await fetch('/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: items[i].preview })
+        });
+        const scanData = await scanRes.json();
+        if (!scanRes.ok) throw new Error(scanData.error || 'AI analysis failed');
+
+        // 2. Mark as saving
+        items[i].status = 'saving';
+        setBulkQueue([...items]);
+
+        // 3. Save to Database
+        const contactPayload = {
+          name: scanData.name || 'Unnamed Contact',
+          title: scanData.title || '',
+          company: scanData.company || '',
+          phone: scanData.phone || '',
+          mobile: scanData.mobile || '',
+          email: scanData.email || '',
+          website: scanData.website || '',
+          address: scanData.address || '',
+          cardImage: scanData.cardImage || '',
+          cardImagePublicId: scanData.cardImagePublicId || '',
+          projectId: selectedProjectId || '',
+          notes: 'Auto-imported via Bulk Scan'
+        };
+
+        const saveRes = await fetch('/api/contacts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(contactPayload)
+        });
+        const saveData = await saveRes.json();
+        if (!saveRes.ok) throw new Error(saveData.error || 'Failed to save contact');
+
+        // 4. Success!
+        items[i].status = 'success';
+        items[i].parsedData = contactPayload;
+        setBulkQueue([...items]);
+      } catch (err) {
+        items[i].status = 'failed';
+        items[i].error = err.message;
+        setBulkQueue([...items]);
+      }
+    }
+
+    setIsBulkProcessing(false);
+    fetchContacts(); // Refresh contact list
+    showToast('Bulk processing complete!', 'success');
+  };
+
+  const handleDownloadBulkCSV = () => {
+    let url = '/api/export?format=csv';
+    if (selectedProjectId) {
+      url += `&projectId=${selectedProjectId}`;
+    }
+    window.open(url, '_blank');
   };
 
   const handleExtractCard = async () => {
@@ -784,76 +900,203 @@ export default function Dashboard() {
               {/* ============ SCAN TAB ============ */}
               {activeTab === 'scan' && (
                 <div style={{ maxWidth: '600px', margin: '0 auto' }}>
-                  {scanning ? (
-                    <div className="extracting-state">
-                      <div className="pulse"></div>
-                      <h2>Analyzing Business Card...</h2>
-                      <p>OpenAI GPT-4o Vision model is reading the text, detecting fields, and extracting information details...</p>
-                    </div>
-                  ) : (
-                    <div className="scan-area">
-                      <div className="scan-preview">
-                        {cameraActive ? (
-                          <>
-                            <video ref={videoRef} autoPlay playsInline muted></video>
-                            <div className="scan-frame">
-                              <span className="corner tl"></span>
-                              <span className="corner tr"></span>
-                              <span className="corner bl"></span>
-                              <span className="corner br"></span>
-                              <div className="scan-line"></div>
+                  {/* Segment Switcher */}
+                  <div className="tab-segment" style={{ display: 'flex', borderRadius: '12px', background: '#f1f3f5', padding: '4px', marginBottom: '20px' }}>
+                    <button 
+                      type="button" 
+                      className={`segment-btn ${scanMode === 'single' ? 'active' : ''}`}
+                      onClick={() => setScanMode('single')}
+                      style={{ flex: 1, padding: '10px', borderRadius: '8px', border: 'none', background: scanMode === 'single' ? '#fff' : 'transparent', fontWeight: '600', fontSize: '13px', color: scanMode === 'single' ? 'var(--red)' : 'var(--text2)', cursor: 'pointer', transition: 'var(--transition)' }}
+                    >
+                      <i className="fas fa-camera" style={{ marginRight: '6px' }}></i> Single Scan
+                    </button>
+                    <button 
+                      type="button" 
+                      className={`segment-btn ${scanMode === 'bulk' ? 'active' : ''}`}
+                      onClick={() => { setScanMode('bulk'); stopCamera(); }}
+                      style={{ flex: 1, padding: '10px', borderRadius: '8px', border: 'none', background: scanMode === 'bulk' ? '#fff' : 'transparent', fontWeight: '600', fontSize: '13px', color: scanMode === 'bulk' ? 'var(--red)' : 'var(--text2)', cursor: 'pointer', transition: 'var(--transition)' }}
+                    >
+                      <i className="fas fa-images" style={{ marginRight: '6px' }}></i> Bulk Upload
+                    </button>
+                  </div>
+
+                  {scanMode === 'single' ? (
+                    scanning ? (
+                      <div className="extracting-state">
+                        <div className="pulse"></div>
+                        <h2>Analyzing Business Card...</h2>
+                        <p>OpenAI GPT-4o Vision model is reading the text, detecting fields, and extracting information details...</p>
+                      </div>
+                    ) : (
+                      <div className="scan-area">
+                        <div className="scan-preview">
+                          {cameraActive ? (
+                            <>
+                              <video ref={videoRef} autoPlay playsInline muted></video>
+                              <div className="scan-frame">
+                                <span className="corner tl"></span>
+                                <span className="corner tr"></span>
+                                <span className="corner bl"></span>
+                                <span className="corner br"></span>
+                                <div className="scan-line"></div>
+                              </div>
+                            </>
+                          ) : scanPreview ? (
+                            <img src={scanPreview} className="preview-img" alt="Captured Card preview" />
+                          ) : (
+                            <div style={{ display: 'flex', height: '100%', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text3)', gap: '12px' }}>
+                              <i className="fas fa-camera" style={{ fontSize: '36px' }}></i>
+                              <p style={{ fontSize: '14px' }}>Camera is closed</p>
                             </div>
-                          </>
-                        ) : scanPreview ? (
-                          <img src={scanPreview} className="preview-img" alt="Captured Card preview" />
-                        ) : (
-                          <div style={{ display: 'flex', height: '100%', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text3)', gap: '12px' }}>
-                            <i className="fas fa-camera" style={{ fontSize: '36px' }}></i>
-                            <p style={{ fontSize: '14px' }}>Camera is closed</p>
+                          )}
+                        </div>
+
+                        <div className="scan-btns">
+                          {cameraActive ? (
+                            <>
+                              <button className="btn-capture" onClick={capturePhoto} title="Capture Image">
+                                <i className="fas fa-camera"></i>
+                              </button>
+                              <button className="btn-gallery" onClick={stopCamera}>
+                                Cancel Camera
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button className="btn-primary" onClick={startCamera}>
+                                <i className="fas fa-video"></i> Start Camera
+                              </button>
+                              <button className="btn-gallery" onClick={triggerScanUpload}>
+                                <i className="fas fa-file-image"></i> Select Photo
+                              </button>
+                            </>
+                          )}
+                        </div>
+
+                        {scanPreview && (
+                          <div style={{ display: 'flex', gap: '10px', width: '100%', marginTop: '10px' }}>
+                            <button className="btn-primary" onClick={handleExtractCard} style={{ flex: 1 }}>
+                              <i className="fas fa-magic"></i> Extract Card Details
+                            </button>
+                            <button className="btn-outline" onClick={() => setScanPreview(null)} style={{ flex: 1 }}>
+                              Discard
+                            </button>
                           </div>
                         )}
+
+                        <input
+                          type="file"
+                          ref={fileInputRef}
+                          style={{ display: 'none' }}
+                          accept="image/*"
+                          onChange={handleFileSelect}
+                        />
+                      </div>
+                    )
+                  ) : (
+                    /* Bulk Scan Mode Panel */
+                    <div className="bulk-scan-area" style={{ background: '#fff', borderRadius: '16px', border: '1px solid var(--border)', padding: '20px' }}>
+                      <div className="form-group" style={{ marginBottom: '16px' }}>
+                        <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)', display: 'block', marginBottom: '6px' }}>Target Project for Scans</label>
+                        <select 
+                          value={selectedProjectId} 
+                          onChange={(e) => setSelectedProjectId(e.target.value)}
+                          style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '14px', outline: 'none' }}
+                        >
+                          <option value="">Personal Contacts (No Project)</option>
+                          {projects.map(p => (
+                            <option key={p._id} value={p._id}>{p.name}</option>
+                          ))}
+                        </select>
                       </div>
 
-                      <div className="scan-btns">
-                        {cameraActive ? (
-                          <>
-                            <button className="btn-capture" onClick={capturePhoto} title="Capture Image">
-                              <i className="fas fa-camera"></i>
-                            </button>
-                            <button className="btn-gallery" onClick={stopCamera}>
-                              Cancel Camera
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <button className="btn-primary" onClick={startCamera}>
-                              <i className="fas fa-video"></i> Start Camera
-                            </button>
-                            <button className="btn-gallery" onClick={triggerScanUpload}>
-                              <i className="fas fa-file-image"></i> Select Photo
-                            </button>
-                          </>
-                        )}
+                      <div className="bulk-upload-box" onClick={triggerBulkUpload} style={{ border: '2px dashed var(--border)', borderRadius: '12px', padding: '30px 16px', textAlign: 'center', cursor: 'pointer', background: '#fafafa', transition: 'var(--transition)', marginBottom: '20px' }}>
+                        <i className="fas fa-cloud-upload-alt" style={{ fontSize: '40px', color: 'var(--red)', marginBottom: '10px' }}></i>
+                        <h3 style={{ fontSize: '15px', fontWeight: '600', marginBottom: '4px' }}>Select Business Card Images</h3>
+                        <p style={{ fontSize: '12px', color: 'var(--text3)' }}>Select multiple images to batch process with AI</p>
+                        <input 
+                          type="file" 
+                          ref={bulkFileInputRef} 
+                          multiple 
+                          style={{ display: 'none' }} 
+                          accept="image/*" 
+                          onChange={handleBulkFileSelect} 
+                        />
                       </div>
 
-                      {scanPreview && (
-                        <div style={{ display: 'flex', gap: '10px', width: '100%', marginTop: '10px' }}>
-                          <button className="btn-primary" onClick={handleExtractCard} style={{ flex: 1 }}>
-                            <i className="fas fa-magic"></i> Extract Card Details
-                          </button>
-                          <button className="btn-outline" onClick={() => setScanPreview(null)} style={{ flex: 1 }}>
-                            Discard
+                      {bulkQueue.length > 0 && (
+                        <>
+                          <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
+                            <button 
+                              className="btn-primary" 
+                              onClick={handleProcessBulkQueue} 
+                              disabled={isBulkProcessing}
+                              style={{ flex: 2 }}
+                            >
+                              {isBulkProcessing ? (
+                                <>
+                                  <span className="spinner" style={{ marginRight: '8px' }}></span>
+                                  Processing ({bulkQueue.filter(q => q.status === 'scanning' || q.status === 'saving').length + 1}/{bulkQueue.length})...
+                                </>
+                              ) : (
+                                <>
+                                  <i className="fas fa-play" style={{ marginRight: '8px' }}></i> Start Bulk AI Scan ({bulkQueue.filter(q => q.status === 'queued' || q.status === 'failed').length} left)
+                                </>
+                              )}
+                            </button>
+                            <button 
+                              className="btn-outline" 
+                              onClick={() => setBulkQueue([])} 
+                              disabled={isBulkProcessing}
+                              style={{ flex: 1 }}
+                            >
+                              <i className="fas fa-trash-can"></i> Clear
+                            </button>
+                          </div>
+
+                          <div className="bulk-queue-list" style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '350px', overflowY: 'auto', paddingRight: '4px' }}>
+                            {bulkQueue.map((item) => (
+                              <div key={item.id} className="bulk-queue-card" style={{ background: '#fcfcfc', border: '1px solid var(--border)', borderRadius: '10px', padding: '10px', display: 'flex', gap: '10px', alignItems: 'center' }}>
+                                <img src={item.preview} style={{ width: '50px', height: '50px', borderRadius: '6px', objectFit: 'cover', border: '1px solid var(--border)' }} alt="Preview" />
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <h4 style={{ fontSize: '13px', fontWeight: '600', margin: '0 0 2px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</h4>
+                                  {item.status === 'queued' && <span style={{ fontSize: '11px', color: 'var(--text3)' }}><i className="fas fa-clock"></i> Queued</span>}
+                                  {item.status === 'scanning' && <span style={{ fontSize: '11px', color: 'var(--red)', fontWeight: '500' }}><i className="fas fa-spinner fa-spin"></i> Analyzing (AI)...</span>}
+                                  {item.status === 'saving' && <span style={{ fontSize: '11px', color: 'var(--red)', fontWeight: '500' }}><i className="fas fa-spinner fa-spin"></i> Saving...</span>}
+                                  {item.status === 'success' && (
+                                    <div>
+                                      <span style={{ fontSize: '11px', color: '#10b981', fontWeight: '600', display: 'block' }}>
+                                        <i className="fas fa-check-circle"></i> Saved successfully
+                                      </span>
+                                      {item.parsedData && (
+                                        <p style={{ fontSize: '11px', color: 'var(--text3)', margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                          <strong>{item.parsedData.name}</strong> • {item.parsedData.title} at {item.parsedData.company}
+                                        </p>
+                                      )}
+                                    </div>
+                                  )}
+                                  {item.status === 'failed' && <span style={{ fontSize: '11px', color: '#ef4444', fontWeight: '500' }}><i className="fas fa-exclamation-circle"></i> Error: {item.error}</span>}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      )}
+
+                      {bulkQueue.some(item => item.status === 'success') && (
+                        <div style={{ marginTop: '20px', padding: '12px', background: 'rgba(230,50,50,0.05)', borderRadius: '10px', border: '1px solid rgba(230,50,50,0.15)', display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center', textAlign: 'center' }}>
+                          <p style={{ fontSize: '12px', color: 'var(--red)', fontWeight: '600', margin: 0 }}>
+                            <i className="fas fa-file-csv"></i> batch contacts saved dynamically in database!
+                          </p>
+                          <button 
+                            onClick={handleDownloadBulkCSV} 
+                            className="btn-primary" 
+                            style={{ fontSize: '12px', padding: '6px 14px', width: 'auto', background: 'var(--red)' }}
+                          >
+                            <i className="fas fa-download"></i> Download Project CSV
                           </button>
                         </div>
                       )}
-
-                      <input
-                        type="file"
-                        ref={fileInputRef}
-                        style={{ display: 'none' }}
-                        accept="image/*"
-                        onChange={handleFileSelect}
-                      />
                     </div>
                   )}
                 </div>
@@ -910,21 +1153,43 @@ export default function Dashboard() {
 
                       <div className="form-group">
                         <label>Current Password</label>
-                        <input
-                          type="password"
-                          placeholder="••••••••"
-                          value={currentPassword}
-                          onChange={(e) => setCurrentPassword(e.target.value)}
-                        />
+                        <div className="input-wrap">
+                          <i className="fas fa-lock field-icon"></i>
+                          <input
+                            type={showCurrentPassword ? 'text' : 'password'}
+                            placeholder="••••••••"
+                            value={currentPassword}
+                            onChange={(e) => setCurrentPassword(e.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="pass-toggle"
+                            onClick={() => setShowCurrentPassword(!showCurrentPassword)}
+                            tabIndex="-1"
+                          >
+                            <i className={`fas ${showCurrentPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
+                          </button>
+                        </div>
                       </div>
                       <div className="form-group">
                         <label>New Password</label>
-                        <input
-                          type="password"
-                          placeholder="••••••••"
-                          value={newPassword}
-                          onChange={(e) => setNewPassword(e.target.value)}
-                        />
+                        <div className="input-wrap">
+                          <i className="fas fa-lock field-icon"></i>
+                          <input
+                            type={showNewPassword ? 'text' : 'password'}
+                            placeholder="••••••••"
+                            value={newPassword}
+                            onChange={(e) => setNewPassword(e.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="pass-toggle"
+                            onClick={() => setShowNewPassword(!showNewPassword)}
+                            tabIndex="-1"
+                          >
+                            <i className={`fas ${showNewPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
+                          </button>
+                        </div>
                       </div>
 
                       <button type="submit" className="btn-primary" disabled={profileLoading} style={{ marginTop: '12px' }}>

@@ -5,6 +5,7 @@ import dbConnect from '@/lib/mongodb';
 import User from '@/models/User';
 import Contact from '@/models/Contact';
 import bcrypt from 'bcryptjs';
+import { sendWelcomeEmail } from '@/lib/email';
 
 export async function GET() {
   const session = await getServerSession(authOptions);
@@ -31,5 +32,13 @@ export async function POST(req) {
   if (exists) return NextResponse.json({ error: 'Email already exists' }, { status: 400 });
   const hashed = await bcrypt.hash(password, 12);
   const user = await User.create({ name, email: email.toLowerCase(), password: hashed, role: role || 'user' });
+  
+  // Send email to the created user with their credentials
+  try {
+    await sendWelcomeEmail(user.email, user.name, password);
+  } catch (err) {
+    console.error('Failed to send welcome email:', err);
+  }
+
   return NextResponse.json({ _id: user._id, name: user.name, email: user.email, role: user.role }, { status: 201 });
 }
