@@ -7,6 +7,8 @@ import Contact from '@/models/Contact';
 import Media from '@/models/Media';
 import Project from '@/models/Project';
 import { deleteImage, uploadImage } from '@/lib/cloudinary';
+import { buildDedupeKeys } from '@/lib/normalize';
+import { findStrongDuplicate, mergeMissingFields } from '@/lib/dedupe';
 
 // Cloudinary upload + AI vision together can exceed Vercel's default function
 // timeout, which surfaced as scans that never saved. Allow up to 60s.
@@ -79,7 +81,8 @@ export async function POST(req) {
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   try {
-    const { image, qr, projectId, autoSave, notes, requestId } = await req.json();
+    const { image, qr, projectId, autoSave, notes, requestId, side } = await req.json();
+    const cardSide = side === 'back' ? 'back' : 'front';
     if (typeof image !== 'string' || !image.startsWith('data:image/')) {
       return NextResponse.json({ error: 'A valid card image is required' }, { status: 400 });
     }
@@ -168,7 +171,48 @@ export async function POST(req) {
       });
     }
 
+    const sizeInKb = Math.round((image.length * 0.75) / 1024);
+    const cardImageEntry = { side: cardSide, url, publicId, scanMethod: method, capturedAt: new Date() };
+
+    // Server-side duplicate prevention (Section 6). If this card strongly
+    // matches an existing contact (same email / mobile / phone+name), we link
+    // the new image and fill blanks instead of creating a second record.
+    const dupe = await findStrongDuplicate(session.user.id, info);
+    if (dupe) {
+      const patch = { ...mergeMissingFields(dupe, info) };
+      if (Object.keys(patch).length) Object.assign(patch, buildDedupeKeys({ ...dupe.toObject(), ...patch }));
+
+      const alreadyHasSide = (dupe.cardImages || []).some(img => img.side === cardSide);
+      const update = {
+        $set: { ...patch, lastSeenAt: new Date() },
+        $inc: { scanCount: 1 },
+      };
+      if (projectId) update.$addToSet = { seenAtProjects: projectId };
+      if (!alreadyHasSide || !dupe.cardImages?.length) {
+        update.$push = { ...(update.$push || {}), cardImages: cardImageEntry };
+      }
+      const updated = await Contact.findByIdAndUpdate(dupe._id, update, { new: true });
+
+      await Media.create({
+        userId: session.user.id,
+        title: `${updated.name}${updated.company ? ' — ' + updated.company : ''}`,
+        url, publicId, fileSize: `${sizeInKb} KB`, fileType: 'image/jpeg',
+        contactId: updated._id, projectId: projectId || null, side: cardSide,
+        scanMethod: method, duplicateStatus: 'merged',
+      }).catch(() => undefined);
+
+      return NextResponse.json({
+        saved: true,
+        duplicate: true,
+        contact: updated,
+        linkedImage: !alreadyHasSide,
+        message: 'This contact already exists. No duplicate was created.',
+        method,
+      });
+    }
+
     // Auto-save: persist Contact + linked Media record in one shot
+    const dedupe = buildDedupeKeys(info);
     const contact = await Contact.create({
       userId: session.user.id,
       projectId: projectId || null,
@@ -183,12 +227,16 @@ export async function POST(req) {
       notes: notes || info.qrNotes || (method === 'qr' ? 'Scanned via QR code' : 'Scanned via AI'),
       cardImage: url,
       cardImagePublicId: publicId,
+      cardImages: [cardImageEntry],
+      designationRaw: info.title || '',
       scanMethod: method,
       scanCost: costUsd,
       scanRequestId: requestId || null,
+      seenAtProjects: projectId ? [projectId] : [],
+      enrichmentStatus: 'pending',
+      ...dedupe,
     });
 
-    const sizeInKb = Math.round((image.length * 0.75) / 1024);
     let media;
     try {
       media = await Media.create({
@@ -199,6 +247,10 @@ export async function POST(req) {
         fileSize: `${sizeInKb} KB`,
         fileType: 'image/jpeg',
         contactId: contact._id,
+        projectId: projectId || null,
+        side: cardSide,
+        scanMethod: method,
+        duplicateStatus: 'unique',
       });
     } catch (error) {
       await Contact.deleteOne({ _id: contact._id });

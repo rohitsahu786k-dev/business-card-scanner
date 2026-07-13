@@ -6,6 +6,7 @@ export function proxy(req) {
 
     if (
       pathname.startsWith('/api/auth') ||
+      pathname === '/api/health' ||
       pathname.startsWith('/api/signup') ||
       pathname.startsWith('/api/forgot-password') ||
       pathname.startsWith('/api/reset-password') ||
