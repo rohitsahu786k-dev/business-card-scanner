@@ -252,6 +252,10 @@ export default function Dashboard() {
     }
 
     cameraStartRef.current = true;
+    // Mount the video element immediately. Previously it was rendered only
+    // after a stream was attached, while stream attachment waited for the
+    // element, causing a first-open deadlock on mobile.
+    setCameraActive(true);
     setCameraStarting(true);
     setScanFeedback({ phase: 'ready', message: 'Starting camera automatically. Allow camera access if prompted...' });
     let permissionTimer;
@@ -278,13 +282,16 @@ export default function Dashboard() {
         }),
       ]);
       cameraStreamRef.current = stream;
-      if (!videoRef.current) {
-        stream.getTracks().forEach(track => track.stop());
-        cameraStreamRef.current = null;
-        return;
+      let video = videoRef.current;
+      for (let attempt = 0; !video && attempt < 4; attempt += 1) {
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        video = videoRef.current;
       }
-      videoRef.current.srcObject = stream;
-      await videoRef.current.play().catch(() => undefined);
+      if (!video) {
+        throw new Error('Camera preview could not be initialized');
+      }
+      video.srcObject = stream;
+      await video.play().catch(() => undefined);
       detectionRef.current = {
         armed: true,
         stableCount: 0,
@@ -295,9 +302,17 @@ export default function Dashboard() {
         lastQrText: '',
       };
       setCameraActive(true);
-      setScanFeedback({ phase: 'ready', message: 'Place a QR code or business card inside the frame' });
+      setScanFeedback({
+        phase: 'ready',
+        message: projectIdRef.current
+          ? 'Place a QR code or business card inside the frame'
+          : 'Camera ready. Select a project or exhibition to start saving contacts.',
+      });
     } catch (err) {
       console.error('Camera access failed:', err);
+      cameraStreamRef.current?.getTracks().forEach(track => track.stop());
+      cameraStreamRef.current = null;
+      setCameraActive(false);
       setScanFeedback({ phase: 'error', message: 'Camera access was blocked. Allow camera permission or upload photos.' });
       showToast('Camera access was blocked. Please allow permission or upload photos.', 'error');
     } finally {
@@ -305,6 +320,16 @@ export default function Dashboard() {
       cameraStartRef.current = false;
       setCameraStarting(false);
     }
+  };
+
+  const openScanner = () => {
+    setScanMode('rapid');
+    setScanPreview(null);
+    setMobileMenuOpen(false);
+    setActiveTab('scan');
+    // Run from the actual camera-button gesture so browsers can grant/open the
+    // camera immediately. The tab effect remains as a safe fallback.
+    startCamera();
   };
 
   // ---------------- BACKGROUND SCAN QUEUE ----------------
@@ -397,6 +422,11 @@ export default function Dashboard() {
   };
 
   const captureForBackground = (qrFields = null, name = '', capturedAt = null) => {
+    if (!projectIdRef.current) {
+      setScanFeedback({ phase: 'error', message: 'Select a project or exhibition before scanning.' });
+      showToast('Select a project or exhibition before scanning.', 'error');
+      return;
+    }
     const frame = grabVideoFrame();
     if (!frame) return;
     const detection = detectionRef.current;
@@ -516,6 +546,13 @@ export default function Dashboard() {
       const analysis = analyseVideoFrame(video, analysisCanvas);
       if (!analysis) return;
 
+      if (!projectIdRef.current) {
+        state.stableCount = 0;
+        state.stableFingerprint = null;
+        setScanFeedback({ phase: 'ready', message: 'Select a project or exhibition to start saving contacts.' });
+        return;
+      }
+
       if (qrText) {
         const parsed = parseQrText(qrText);
         if (!isMeaningfulQrContact(parsed)) {
@@ -623,6 +660,11 @@ export default function Dashboard() {
   const handleBulkFileSelect = (e) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
+    if (!selectedProjectId) {
+      showToast('Select a project or exhibition before uploading cards.', 'error');
+      e.target.value = '';
+      return;
+    }
     files.forEach((file) => {
       const reader = new FileReader();
       reader.onload = (event) => enqueueScans([{ name: file.name, preview: event.target.result }]);
@@ -632,11 +674,15 @@ export default function Dashboard() {
   };
 
   const handleDownloadBulkCSV = () => {
-    let url = '/api/export?format=csv';
-    if (selectedProjectId) {
-      url += `&projectId=${selectedProjectId}`;
+    if (!selectedProjectId) {
+      showToast('Select a project or exhibition to download its CSV.', 'error');
+      return;
     }
-    window.open(url, '_blank');
+    window.open(`/api/export?format=csv&projectId=${encodeURIComponent(selectedProjectId)}`, '_blank');
+  };
+
+  const handleDownloadProjectCSV = (projectId) => {
+    window.open(`/api/export?format=csv&projectId=${encodeURIComponent(projectId)}`, '_blank');
   };
 
   /* Removed single-shot review flow; unified scanner auto-saves instead.
@@ -687,6 +733,7 @@ export default function Dashboard() {
   };
 
   const pendingScans = bulkQueue.filter(i => i.status === 'queued' || i.status === 'processing').length;
+  const selectedDestination = projects.find(project => project._id === selectedProjectId) || null;
 
   const renderQueueTray = () => {
     if (bulkQueue.length === 0) return null;
@@ -825,7 +872,9 @@ export default function Dashboard() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to save project');
 
-      showToast(isNew ? 'Project created!' : 'Project updated!', 'success');
+      setSelectedProjectId(data._id);
+      setScanFeedback({ phase: 'ready', message: `${data.name} selected. Ready to scan contacts.` });
+      showToast(isNew ? `${data.type === 'exhibition' ? 'Exhibition' : 'Project'} created and selected!` : 'Project / exhibition updated!', 'success');
       setProjectModal(null);
       fetchProjects();
     } catch (err) {
@@ -834,12 +883,13 @@ export default function Dashboard() {
   };
 
   const handleDeleteProject = async (id) => {
-    if (!confirm('Delete this project folder? Contacts inside will not be deleted, they will be set to unorganized.')) return;
+    if (!confirm('Delete this project / exhibition? Contacts inside will not be deleted; they will become unorganized.')) return;
     try {
       const res = await fetch(`/api/projects/${id}`, { method: 'DELETE' });
       if (res.ok) {
         showToast('Project deleted', 'success');
         setProjectModal(null);
+        if (selectedProjectId === id) setSelectedProjectId('');
         fetchProjects();
         fetchContacts();
       } else {
@@ -1113,7 +1163,7 @@ export default function Dashboard() {
           </button>
           <button className={`nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => { setActiveTab('projects'); setMobileMenuOpen(false); }}>
             <i className="fas fa-folder"></i>
-            <span>Projects</span>
+            <span>Projects / Exhibitions</span>
             <span className="badge">{projects.length}</span>
           </button>
           <button className={`nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => { setActiveTab('media'); setMobileMenuOpen(false); }}>
@@ -1121,7 +1171,7 @@ export default function Dashboard() {
             <span>Media Gallery</span>
             <span className="badge">{mediaItems.length}</span>
           </button>
-          <button className={`nav-item ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => { setActiveTab('scan'); setMobileMenuOpen(false); setScanMode('rapid'); }}>
+          <button className={`nav-item ${activeTab === 'scan' ? 'active' : ''}`} onClick={openScanner}>
             <i className="fas fa-qrcode"></i>
             <span>Scan Card / QR</span>
           </button>
@@ -1170,9 +1220,9 @@ export default function Dashboard() {
 
           <h1>
             {activeTab === 'contacts' && 'My Contacts'}
-            {activeTab === 'projects' && 'Project Folders'}
+            {activeTab === 'projects' && 'Projects & Exhibitions'}
             {activeTab === 'media' && 'Media Gallery'}
-            {activeTab === 'scan' && 'Scan Card'}
+            {activeTab === 'scan' && 'Scan Visitors'}
             {activeTab === 'profile' && 'My Profile'}
             {activeTab === 'admin' && 'Admin Console'}
           </h1>
@@ -1198,7 +1248,7 @@ export default function Dashboard() {
                 <button className="icon-btn" onClick={() => handleExport('csv')} title="Download all contacts as CSV" aria-label="Download all contacts as CSV">
                   <i className="fas fa-file-csv"></i>
                 </button>
-                <button className="btn-sm btn-quick-scan" onClick={() => { setActiveTab('scan'); setScanMode('rapid'); }}>
+                <button className="btn-sm btn-quick-scan" onClick={openScanner}>
                   <i className="fas fa-camera"></i>
                   <span>Quick Scan</span>
                 </button>
@@ -1278,7 +1328,7 @@ export default function Dashboard() {
                       <div className="empty-icon"><i className="fas fa-id-card"></i></div>
                       <h2>No contacts found</h2>
                       <p>Try resetting filters, searching for something else, or scan a new business card.</p>
-                      <button className="btn-primary" onClick={() => { setActiveTab('scan'); setScanMode('rapid'); }} style={{ maxWidth: '200px', margin: '0 auto' }}>
+                      <button className="btn-primary" onClick={openScanner} style={{ maxWidth: '200px', margin: '0 auto' }}>
                         <i className="fas fa-camera"></i> Scan Card Now
                       </button>
                     </div>
@@ -1546,28 +1596,41 @@ export default function Dashboard() {
               {activeTab === 'projects' && (
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                    <p style={{ color: 'var(--text2)', fontSize: '14px' }}>Organize contacts into custom folders and client lists.</p>
-                    <button className="btn-sm" onClick={() => setProjectModal({ name: '', description: '' })}>
-                      <i className="fas fa-plus"></i> New Project Folder
+                    <p style={{ color: 'var(--text2)', fontSize: '14px' }}>Create a project or exhibition, scan visitors into it, then export the complete event list.</p>
+                    <button className="btn-sm" onClick={() => setProjectModal({ name: '', type: 'exhibition', description: '', eventDate: '', location: '' })}>
+                      <i className="fas fa-plus"></i> New Project / Exhibition
                     </button>
                   </div>
 
                   {projects.length === 0 ? (
                     <div className="empty-state">
                       <div className="empty-icon"><i className="fas fa-folder-open"></i></div>
-                      <h2>No folders created yet</h2>
-                      <p>Create a project directory to categorize business cards per business case or company.</p>
+                      <h2>No projects or exhibitions yet</h2>
+                      <p>Create your first destination before starting a visitor scanning session.</p>
                     </div>
                   ) : (
                     <div className="project-grid">
                       {projects.map(p => (
                         <div key={p._id} className="project-card" style={{ borderColor: 'var(--border)' }} onClick={() => { setSelectedProjectId(p._id); setActiveTab('contacts'); }}>
+                          <span className={`project-type-badge ${p.type || 'project'}`}>
+                            <i className={`fas ${p.type === 'exhibition' ? 'fa-building-columns' : 'fa-folder'}`}></i>
+                            {p.type === 'exhibition' ? 'Exhibition' : 'Project'}
+                          </span>
                           <h3>{p.name}</h3>
                           <p>{p.description || 'No description provided'}</p>
+                          {(p.eventDate || p.location) && (
+                            <div className="project-event-meta">
+                              {p.eventDate && <span><i className="fas fa-calendar-day"></i> {new Date(p.eventDate).toLocaleDateString()}</span>}
+                              {p.location && <span><i className="fas fa-location-dot"></i> {p.location}</span>}
+                            </div>
+                          )}
                           <span className="project-count">
                             <i className="fas fa-user-friends"></i> {p.contactCount || 0} Contacts
                           </span>
                           <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '14px' }} onClick={e => e.stopPropagation()}>
+                            <button className="icon-btn project-csv-btn" onClick={() => handleDownloadProjectCSV(p._id)} title={`Export ${p.name} contacts as CSV`} style={{ width: '34px', height: '30px', fontSize: '12px' }}>
+                              <i className="fas fa-file-csv"></i>
+                            </button>
                             <button className="icon-btn" onClick={() => setProjectModal(p)} style={{ width: '30px', height: '30px', fontSize: '12px' }}>
                               <i className="fas fa-pen"></i>
                             </button>
@@ -1611,15 +1674,52 @@ export default function Dashboard() {
                   </div>
 
                   {/* Target project — every scan is saved straight to DB + Media */}
-                  <div className="scan-target-row">
-                    <label><i className="fas fa-folder"></i> Save scans to</label>
-                    <select value={selectedProjectId} onChange={(e) => setSelectedProjectId(e.target.value)}>
-                      <option value="">Personal Contacts (No Project)</option>
-                      {projects.map(p => (
-                        <option key={p._id} value={p._id}>{p.name}</option>
+                  <section className={`scan-destination-panel ${selectedDestination ? 'selected' : 'required'}`}>
+                    <div className="scan-destination-head">
+                      <div>
+                        <small>Step 1</small>
+                        <h2><i className="fas fa-calendar-check"></i> Select Project / Exhibition</h2>
+                        <p>Every scanned visitor will be grouped here for one-click CSV export.</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-outline"
+                        onClick={() => setProjectModal({ name: '', type: 'exhibition', description: '', eventDate: '', location: '' })}
+                      >
+                        <i className="fas fa-plus"></i> New
+                      </button>
+                    </div>
+                    <select
+                      aria-label="Select project or exhibition"
+                      value={selectedProjectId}
+                      onChange={(event) => {
+                        setSelectedProjectId(event.target.value);
+                        if (event.target.value) setScanFeedback({ phase: 'ready', message: 'Destination selected. Place a QR code or visiting card inside the frame.' });
+                      }}
+                    >
+                      <option value="">Choose a project / exhibition...</option>
+                      {projects.map(project => (
+                        <option key={project._id} value={project._id}>
+                          {project.type === 'exhibition' ? 'Exhibition' : 'Project'} — {project.name}
+                        </option>
                       ))}
                     </select>
-                  </div>
+                    {selectedDestination ? (
+                      <div className="selected-destination-summary">
+                        <div>
+                          <strong><i className={`fas ${selectedDestination.type === 'exhibition' ? 'fa-building-columns' : 'fa-folder'}`}></i> {selectedDestination.name}</strong>
+                          <span>{selectedDestination.contactCount || 0} saved contacts{selectedDestination.location ? ` • ${selectedDestination.location}` : ''}</span>
+                        </div>
+                        <button type="button" className="btn-export-event" onClick={handleDownloadBulkCSV}>
+                          <i className="fas fa-file-csv"></i> Export CSV
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="destination-required-message">
+                        <i className="fas fa-circle-info"></i> Select or create a destination before scanning.
+                      </div>
+                    )}
+                  </section>
 
                   {renderSessionStats()}
 
@@ -2070,7 +2170,7 @@ export default function Dashboard() {
                 <div className="detail-field">
                   <i className="fas fa-folder"></i>
                   <div className="detail-field-info">
-                    <small>Project Folder</small>
+                    <small>Project / Exhibition</small>
                     <p>{projects.find(p => p._id === viewContact.projectId)?.name}</p>
                   </div>
                 </div>
@@ -2167,7 +2267,7 @@ export default function Dashboard() {
                   />
                 </div>
                 <div className="form-group">
-                  <label>Project Folder</label>
+                  <label>Project / Exhibition</label>
                   <select
                     value={editContact.projectId || ''}
                     onChange={e => setEditContact({ ...editContact, projectId: e.target.value || null })}
@@ -2201,7 +2301,7 @@ export default function Dashboard() {
         <div className="modal-overlay" onClick={() => setProjectModal(null)}>
           <div className="modal-box" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <h2>{projectModal._id ? 'Edit Folder' : 'New Project Folder'}</h2>
+              <h2>{projectModal._id ? 'Edit Project / Exhibition' : 'New Project / Exhibition'}</h2>
               <button className="close-btn" onClick={() => setProjectModal(null)}>
                 <i className="fas fa-times"></i>
               </button>
@@ -2209,13 +2309,42 @@ export default function Dashboard() {
             <form onSubmit={handleSaveProject}>
               <div className="modal-body">
                 <div className="form-group">
-                  <label>Folder Name</label>
+                  <label>Destination Type</label>
+                  <select
+                    value={projectModal.type || 'project'}
+                    onChange={e => setProjectModal({ ...projectModal, type: e.target.value })}
+                  >
+                    <option value="project">Project</option>
+                    <option value="exhibition">Exhibition / Event</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Name</label>
                   <input
                     type="text"
                     value={projectModal.name}
                     onChange={e => setProjectModal({ ...projectModal, name: e.target.value })}
                     required
                   />
+                </div>
+                <div className="destination-form-grid">
+                  <div className="form-group">
+                    <label>Event Date <span>(Optional)</span></label>
+                    <input
+                      type="date"
+                      value={projectModal.eventDate ? String(projectModal.eventDate).slice(0, 10) : ''}
+                      onChange={e => setProjectModal({ ...projectModal, eventDate: e.target.value })}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Location <span>(Optional)</span></label>
+                    <input
+                      type="text"
+                      value={projectModal.location || ''}
+                      placeholder="Venue or city"
+                      onChange={e => setProjectModal({ ...projectModal, location: e.target.value })}
+                    />
+                  </div>
                 </div>
                 <div className="form-group">
                   <label>Description</label>
@@ -2228,7 +2357,7 @@ export default function Dashboard() {
               </div>
               <div className="modal-footer">
                 <button type="button" className="btn-outline" onClick={() => setProjectModal(null)}>Cancel</button>
-                <button type="submit" className="btn-primary">Save Folder</button>
+                <button type="submit" className="btn-primary">Save & Select</button>
               </div>
             </form>
           </div>
@@ -2364,9 +2493,9 @@ export default function Dashboard() {
         </button>
         <button className={`mobile-nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => setActiveTab('projects')}>
           <i className="fas fa-folder"></i>
-          <span>Projects</span>
+          <span>Events</span>
         </button>
-        <button className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => { setActiveTab('scan'); setScanMode('rapid'); }} aria-label="Open automatic scanner">
+        <button className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''}`} onClick={openScanner} aria-label="Open automatic scanner">
           <div className="scan-btn-inner">
             <i className="fas fa-camera"></i>
           </div>

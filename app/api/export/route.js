@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
+import mongoose from 'mongoose';
 import { authOptions } from '@/app/api/auth/[...nextauth]/route';
 import dbConnect from '@/lib/mongodb';
 import Contact from '@/models/Contact';
+import Project from '@/models/Project';
 
 export async function GET(req) {
   const session = await getServerSession(authOptions);
@@ -12,8 +14,19 @@ export async function GET(req) {
   const format = searchParams.get('format') || 'csv';
   const projectId = searchParams.get('projectId');
   const filter = { userId: session.user.id };
-  if (projectId) filter.projectId = projectId;
-  const contacts = await Contact.find(filter).populate('projectId', 'name').sort({ createdAt: -1 }).lean();
+  let selectedProject = null;
+  if (projectId) {
+    if (!mongoose.isValidObjectId(projectId)) {
+      return NextResponse.json({ error: 'Invalid project / exhibition ID' }, { status: 400 });
+    }
+    selectedProject = await Project.findOne({ _id: projectId, userId: session.user.id }).lean();
+    if (!selectedProject) return NextResponse.json({ error: 'Project / exhibition not found' }, { status: 404 });
+    filter.projectId = projectId;
+  }
+  const contacts = await Contact.find(filter)
+    .populate('projectId', 'name type eventDate location')
+    .sort({ createdAt: -1 })
+    .lean();
 
   if (format === 'csv') {
     const csvCell = (value) => {
@@ -23,18 +36,24 @@ export async function GET(req) {
     };
     const headers = [
       'Contact ID', 'Name', 'Job Title', 'Company', 'Phone', 'Mobile', 'Email',
-      'Website', 'Address', 'Notes', 'Project', 'Favorite', 'Scan Method',
-      'Scan Cost (USD)', 'Captured At', 'Card Image URL',
+      'Website', 'Address', 'Notes', 'Project / Exhibition', 'Destination Type',
+      'Event Date', 'Location', 'Favorite', 'Scan Method', 'Scan Cost (USD)',
+      'Captured At', 'Card Image URL',
     ];
     const rows = contacts.map(c => [
       c._id, c.name, c.title, c.company, c.phone, c.mobile, c.email, c.website,
-      c.address, c.notes, c.projectId?.name || '', c.favorite ? 'Yes' : 'No',
-      c.scanMethod, c.scanCost || 0, c.createdAt ? new Date(c.createdAt).toISOString() : '',
-      c.cardImage,
+      c.address, c.notes, c.projectId?.name || '', c.projectId?.type || '',
+      c.projectId?.eventDate ? new Date(c.projectId.eventDate).toISOString().slice(0, 10) : '',
+      c.projectId?.location || '', c.favorite ? 'Yes' : 'No', c.scanMethod,
+      c.scanCost || 0, c.createdAt ? new Date(c.createdAt).toISOString() : '', c.cardImage,
     ].map(csvCell).join(','));
     const date = new Date().toISOString().slice(0, 10);
+    const exportName = (selectedProject?.name || 'all-contacts')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '') || 'contacts';
     return new NextResponse(`\uFEFF${headers.map(csvCell).join(',')}\r\n${rows.join('\r\n')}`, {
-      headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="contacts-${date}.csv"` },
+      headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${exportName}-${date}.csv"` },
     });
   }
   if (format === 'vcf') {
