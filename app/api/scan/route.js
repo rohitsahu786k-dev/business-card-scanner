@@ -8,6 +8,10 @@ import Media from '@/models/Media';
 import Project from '@/models/Project';
 import { deleteImage, uploadImage } from '@/lib/cloudinary';
 
+// Cloudinary upload + AI vision together can exceed Vercel's default function
+// timeout, which surfaced as scans that never saved. Allow up to 60s.
+export const maxDuration = 60;
+
 // gpt-4o-mini pricing (USD per 1M tokens)
 const INPUT_COST_PER_M = 0.15;
 const OUTPUT_COST_PER_M = 0.60;
@@ -109,32 +113,36 @@ export async function POST(req) {
       if (!ownsProject) return NextResponse.json({ error: 'Selected project was not found' }, { status: 404 });
     }
 
-    // Store the card image in Cloudinary (media storage) first
-    const { url, publicId } = await uploadImage(image, 'cardscan/cards');
-
     // QR path: client already decoded the QR — deterministic, zero AI cost.
-    // AI path: extract from the uploaded image with structured output.
+    // AI path: extract from the base64 image directly while the Cloudinary
+    // upload runs in parallel — sequential upload-then-AI (with OpenAI
+    // re-downloading the Cloudinary URL) made every scan several seconds slower.
+    const uploadPromise = uploadImage(image, 'cardscan/cards');
     let info;
     let costUsd = 0;
     let method;
-    try {
-      if (qr && typeof qr === 'object') {
-        info = {
-          name: qr.name || '', title: qr.title || '', company: qr.company || '',
-          phone: qr.phone || '', mobile: qr.mobile || '', email: qr.email || '',
-          website: qr.website || '', address: qr.address || '',
-        };
-        method = 'qr';
-        if (qr.notes) info.qrNotes = qr.notes;
-      } else {
-        const result = await extractWithAI(url);
-        info = result.info;
-        costUsd = result.costUsd;
-        method = 'ai';
+    let url;
+    let publicId;
+    if (qr && typeof qr === 'object') {
+      info = {
+        name: qr.name || '', title: qr.title || '', company: qr.company || '',
+        phone: qr.phone || '', mobile: qr.mobile || '', email: qr.email || '',
+        website: qr.website || '', address: qr.address || '',
+      };
+      method = 'qr';
+      if (qr.notes) info.qrNotes = qr.notes;
+      ({ url, publicId } = await uploadPromise);
+    } else {
+      const [uploadResult, aiResult] = await Promise.allSettled([uploadPromise, extractWithAI(image)]);
+      if (uploadResult.status === 'rejected') throw uploadResult.reason;
+      ({ url, publicId } = uploadResult.value);
+      if (aiResult.status === 'rejected') {
+        await deleteImage(publicId).catch(() => undefined);
+        throw aiResult.reason;
       }
-    } catch (error) {
-      await deleteImage(publicId).catch(() => undefined);
-      throw error;
+      info = aiResult.value.info;
+      costUsd = aiResult.value.costUsd;
+      method = 'ai';
     }
 
     const hasDirectContact = Boolean(info.email || info.phone || info.mobile || info.website);

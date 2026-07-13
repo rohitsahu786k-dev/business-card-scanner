@@ -340,6 +340,12 @@ export default function Dashboard() {
     setBulkQueue(prev => prev.map(i => (i.id === id ? { ...i, ...patch } : i)));
   };
 
+  // The live detector fires several times per second; keeping the previous
+  // state object when nothing changed lets React skip re-rendering the page.
+  const setScanFeedbackIfChanged = (phase, message) => {
+    setScanFeedback(prev => (prev.phase === phase && prev.message === message ? prev : { phase, message }));
+  };
+
   const enqueueScans = (items) => {
     const stamped = items.map((it, idx) => {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}-${idx}`;
@@ -415,10 +421,13 @@ export default function Dashboard() {
     if (!video || !video.videoWidth) return null;
     const canvas = canvasRef.current;
     const crop = getCardCrop(video.videoWidth, video.videoHeight);
-    canvas.width = Math.round(crop.width);
-    canvas.height = Math.round(crop.height);
+    // Capture at upload size directly so compressImageDataUrl becomes a no-op —
+    // full-res capture plus a second decode/encode caused visible jank on mobile.
+    const scale = Math.min(1, 1600 / Math.max(crop.width, crop.height));
+    canvas.width = Math.round(crop.width * scale);
+    canvas.height = Math.round(crop.height * scale);
     canvas.getContext('2d').drawImage(video, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.9);
+    return canvas.toDataURL('image/jpeg', 0.85);
   };
 
   const captureForBackground = (qrFields = null, name = '', capturedAt = null) => {
@@ -529,14 +538,14 @@ export default function Dashboard() {
       const video = videoRef.current;
       if (!video || video.readyState < 2 || !video.videoWidth) return;
 
-      const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+      const scale = Math.min(1, 480 / Math.max(video.videoWidth, video.videoHeight));
       qrCanvas.width = Math.round(video.videoWidth * scale);
       qrCanvas.height = Math.round(video.videoHeight * scale);
       qrContext.drawImage(video, 0, 0, qrCanvas.width, qrCanvas.height);
 
       let qrText = null;
       try {
-        qrText = decodeQrFromImageData(qrContext.getImageData(0, 0, qrCanvas.width, qrCanvas.height));
+        qrText = decodeQrFromImageData(qrContext.getImageData(0, 0, qrCanvas.width, qrCanvas.height), 'dontInvert');
       } catch {
         return;
       }
@@ -549,14 +558,14 @@ export default function Dashboard() {
       if (!projectIdRef.current) {
         state.stableCount = 0;
         state.stableFingerprint = null;
-        setScanFeedback({ phase: 'ready', message: 'Select a project or exhibition to start saving contacts.' });
+        setScanFeedbackIfChanged('ready', 'Select a project or exhibition to start saving contacts.');
         return;
       }
 
       if (qrText) {
         const parsed = parseQrText(qrText);
         if (!isMeaningfulQrContact(parsed)) {
-          setScanFeedback({ phase: 'detecting', message: 'QR detected, but it does not contain contact information.' });
+          setScanFeedbackIfChanged('detecting', 'QR detected, but it does not contain contact information.');
           return;
         }
         if (state.armed && qrText !== state.lastQrText && now - state.lastCaptureAt > 1200) {
@@ -570,7 +579,7 @@ export default function Dashboard() {
             now,
           );
         } else {
-          setScanFeedback({ phase: 'saved', message: 'This QR is already captured. Show the next card.' });
+          setScanFeedbackIfChanged('saved', 'This QR is already captured. Show the next card.');
         }
         return;
       }
@@ -587,7 +596,7 @@ export default function Dashboard() {
           state.stableFingerprint = null;
           state.lastQrText = '';
           state.lastCaptureAt = 0;
-          setScanFeedback({ phase: 'ready', message: 'Ready. Place the next QR code or business card inside the frame.' });
+          setScanFeedbackIfChanged('ready', 'Ready. Place the next QR code or business card inside the frame.');
         }
         return;
       }
@@ -595,14 +604,14 @@ export default function Dashboard() {
       if (!analysis.cardLike) {
         state.stableCount = 0;
         state.stableFingerprint = null;
-        setScanFeedback({ phase: 'ready', message: 'Place a QR code or business card inside the frame' });
+        setScanFeedbackIfChanged('ready', 'Place a QR code or business card inside the frame');
         return;
       }
 
       const stability = fingerprintDistance(analysis.fingerprint, state.stableFingerprint);
       state.stableCount = stability < 5.5 ? state.stableCount + 1 : 1;
       state.stableFingerprint = analysis.fingerprint;
-      setScanFeedback({ phase: 'detecting', message: `Business card detected. Hold steady${'.'.repeat(Math.min(state.stableCount, 3))}` });
+      setScanFeedbackIfChanged('detecting', `Business card detected. Hold steady${'.'.repeat(Math.min(state.stableCount, 3))}`);
 
       if (state.stableCount >= 4 && now - state.lastCaptureAt > 1800) {
         state.armed = false;
