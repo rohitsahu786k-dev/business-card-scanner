@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/app/api/auth/[...nextauth]/route';
 import dbConnect from '@/lib/mongodb';
 import Contact from '@/models/Contact';
+import Media from '@/models/Media';
 import { deleteImage } from '@/lib/cloudinary';
 
 export async function GET(req, { params }) {
@@ -53,7 +54,12 @@ export async function DELETE(req, { params }) {
     await dbConnect();
     const contact = await Contact.findOneAndDelete({ _id: id, userId: session.user.id });
     if (!contact) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
-    if (contact.cardImagePublicId) await deleteImage(contact.cardImagePublicId);
+    await Media.deleteMany({ contactId: contact._id, userId: session.user.id });
+    if (contact.cardImagePublicId) {
+      await deleteImage(contact.cardImagePublicId).catch(error => {
+        console.error('Contact image cleanup failed:', error);
+      });
+    }
     return NextResponse.json({ message: 'Deleted' });
   } catch (error) {
     console.error('Contact DELETE error:', error);

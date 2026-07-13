@@ -17,6 +17,12 @@ const ContactSchema = new mongoose.Schema({
   favorite: { type: Boolean, default: false },
   scanMethod: { type: String, enum: ['ai', 'qr', 'manual', 'import'], default: 'manual' },
   scanCost: { type: Number, default: 0 }, // USD cost of the AI extraction for this scan
+  scanRequestId: { type: String, default: null },
 }, { timestamps: true });
+
+ContactSchema.index(
+  { userId: 1, scanRequestId: 1 },
+  { unique: true, partialFilterExpression: { scanRequestId: { $type: 'string' } } },
+);
 
 export default mongoose.models.Contact || mongoose.model('Contact', ContactSchema);

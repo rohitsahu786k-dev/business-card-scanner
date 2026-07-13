@@ -1,10 +1,12 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
+import mongoose from 'mongoose';
 import { authOptions } from '@/app/api/auth/[...nextauth]/route';
 import dbConnect from '@/lib/mongodb';
 import Contact from '@/models/Contact';
 import Media from '@/models/Media';
-import { uploadImage } from '@/lib/cloudinary';
+import Project from '@/models/Project';
+import { deleteImage, uploadImage } from '@/lib/cloudinary';
 
 // gpt-4o-mini pricing (USD per 1M tokens)
 const INPUT_COST_PER_M = 0.15;
@@ -73,10 +75,39 @@ export async function POST(req) {
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   try {
-    const { image, qr, projectId, autoSave, notes } = await req.json();
-    if (!image) return NextResponse.json({ error: 'No image provided' }, { status: 400 });
+    const { image, qr, projectId, autoSave, notes, requestId } = await req.json();
+    if (typeof image !== 'string' || !image.startsWith('data:image/')) {
+      return NextResponse.json({ error: 'A valid card image is required' }, { status: 400 });
+    }
+    if (image.length > 12_000_000) {
+      return NextResponse.json({ error: 'The card image is too large' }, { status: 413 });
+    }
+    if (requestId && (typeof requestId !== 'string' || requestId.length > 120)) {
+      return NextResponse.json({ error: 'Invalid scan request ID' }, { status: 400 });
+    }
 
     await dbConnect();
+
+    if (requestId) {
+      const existing = await Contact.findOne({ userId: session.user.id, scanRequestId: requestId });
+      if (existing) {
+        return NextResponse.json({
+          saved: true,
+          duplicate: true,
+          contact: existing,
+          costUsd: existing.scanCost || 0,
+          method: existing.scanMethod,
+        });
+      }
+    }
+
+    if (projectId) {
+      if (typeof projectId !== 'string' || !mongoose.isValidObjectId(projectId)) {
+        return NextResponse.json({ error: 'Invalid project ID' }, { status: 400 });
+      }
+      const ownsProject = await Project.exists({ _id: projectId, userId: session.user.id });
+      if (!ownsProject) return NextResponse.json({ error: 'Selected project was not found' }, { status: 404 });
+    }
 
     // Store the card image in Cloudinary (media storage) first
     const { url, publicId } = await uploadImage(image, 'cardscan/cards');
@@ -86,19 +117,34 @@ export async function POST(req) {
     let info;
     let costUsd = 0;
     let method;
-    if (qr && typeof qr === 'object') {
-      info = {
-        name: qr.name || '', title: qr.title || '', company: qr.company || '',
-        phone: qr.phone || '', mobile: qr.mobile || '', email: qr.email || '',
-        website: qr.website || '', address: qr.address || '',
-      };
-      method = 'qr';
-      if (qr.notes) info.qrNotes = qr.notes;
-    } else {
-      const result = await extractWithAI(url);
-      info = result.info;
-      costUsd = result.costUsd;
-      method = 'ai';
+    try {
+      if (qr && typeof qr === 'object') {
+        info = {
+          name: qr.name || '', title: qr.title || '', company: qr.company || '',
+          phone: qr.phone || '', mobile: qr.mobile || '', email: qr.email || '',
+          website: qr.website || '', address: qr.address || '',
+        };
+        method = 'qr';
+        if (qr.notes) info.qrNotes = qr.notes;
+      } else {
+        const result = await extractWithAI(url);
+        info = result.info;
+        costUsd = result.costUsd;
+        method = 'ai';
+      }
+    } catch (error) {
+      await deleteImage(publicId).catch(() => undefined);
+      throw error;
+    }
+
+    const hasDirectContact = Boolean(info.email || info.phone || info.mobile || info.website);
+    const hasIdentityContext = Boolean((info.name && (info.title || info.company || info.address)) || (info.company && info.address));
+    if (!hasDirectContact && !hasIdentityContext) {
+      await deleteImage(publicId).catch(() => undefined);
+      return NextResponse.json(
+        { error: 'No readable contact information was found. Hold the card steady and try again.' },
+        { status: 422 },
+      );
     }
 
     costUsd = Math.round(costUsd * 1e6) / 1e6;
@@ -131,18 +177,26 @@ export async function POST(req) {
       cardImagePublicId: publicId,
       scanMethod: method,
       scanCost: costUsd,
+      scanRequestId: requestId || null,
     });
 
     const sizeInKb = Math.round((image.length * 0.75) / 1024);
-    const media = await Media.create({
-      userId: session.user.id,
-      title: `${contact.name}${contact.company ? ' — ' + contact.company : ''}`,
-      url,
-      publicId,
-      fileSize: `${sizeInKb} KB`,
-      fileType: 'image/jpeg',
-      contactId: contact._id,
-    });
+    let media;
+    try {
+      media = await Media.create({
+        userId: session.user.id,
+        title: `${contact.name}${contact.company ? ' — ' + contact.company : ''}`,
+        url,
+        publicId,
+        fileSize: `${sizeInKb} KB`,
+        fileType: 'image/jpeg',
+        contactId: contact._id,
+      });
+    } catch (error) {
+      await Contact.deleteOne({ _id: contact._id });
+      await deleteImage(publicId).catch(() => undefined);
+      throw error;
+    }
 
     return NextResponse.json({ saved: true, contact, mediaId: media._id, costUsd, method }, { status: 201 });
   } catch (err) {
