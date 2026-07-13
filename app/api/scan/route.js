@@ -81,8 +81,11 @@ export async function POST(req) {
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   try {
-    const { image, qr, projectId, autoSave, notes, requestId, side } = await req.json();
+    const { image, qr, projectId, autoSave, notes, requestId, side, linkToContactId } = await req.json();
     const cardSide = side === 'back' ? 'back' : 'front';
+    if (linkToContactId && (typeof linkToContactId !== 'string' || !mongoose.isValidObjectId(linkToContactId))) {
+      return NextResponse.json({ error: 'Invalid contact link ID' }, { status: 400 });
+    }
     if (typeof image !== 'string' || !image.startsWith('data:image/')) {
       return NextResponse.json({ error: 'A valid card image is required' }, { status: 400 });
     }
@@ -148,9 +151,11 @@ export async function POST(req) {
       method = 'ai';
     }
 
+    // When linking a second side to an existing contact, a logo-only or
+    // QR-only image is still a valid back — skip the "no readable info" gate.
     const hasDirectContact = Boolean(info.email || info.phone || info.mobile || info.website);
     const hasIdentityContext = Boolean((info.name && (info.title || info.company || info.address)) || (info.company && info.address));
-    if (!hasDirectContact && !hasIdentityContext) {
+    if (!linkToContactId && !hasDirectContact && !hasIdentityContext) {
       await deleteImage(publicId).catch(() => undefined);
       return NextResponse.json(
         { error: 'No readable contact information was found. Hold the card steady and try again.' },
@@ -159,6 +164,44 @@ export async function POST(req) {
     }
 
     costUsd = Math.round(costUsd * 1e6) / 1e6;
+
+    // ---- Link a second side (back) to an existing contact (Section 5) ----
+    // No new contact is created; we append the image and fill only blank fields.
+    if (linkToContactId) {
+      const target = await Contact.findOne({ _id: linkToContactId, userId: session.user.id });
+      if (!target) {
+        await deleteImage(publicId).catch(() => undefined);
+        return NextResponse.json({ error: 'The contact to attach this side to was not found' }, { status: 404 });
+      }
+      const patch = { ...mergeMissingFields(target, info) };
+      if (Object.keys(patch).length) Object.assign(patch, buildDedupeKeys({ ...target.toObject(), ...patch }));
+      const sizeKb = Math.round((image.length * 0.75) / 1024);
+      const updated = await Contact.findByIdAndUpdate(
+        target._id,
+        {
+          $set: { ...patch, lastSeenAt: new Date() },
+          $inc: { scanCost: costUsd },
+          $push: { cardImages: { side: cardSide, url, publicId, scanMethod: method, capturedAt: new Date() } },
+        },
+        { new: true },
+      );
+      await Media.create({
+        userId: session.user.id,
+        title: `${updated.name}${updated.company ? ' — ' + updated.company : ''} (${cardSide})`,
+        url, publicId, fileSize: `${sizeKb} KB`, fileType: 'image/jpeg',
+        contactId: updated._id, projectId: projectId || null, side: cardSide, scanMethod: method,
+      }).catch(() => undefined);
+
+      return NextResponse.json({
+        saved: true,
+        linked: true,
+        side: cardSide,
+        contact: updated,
+        costUsd,
+        method,
+        message: cardSide === 'back' ? 'Back side captured and linked to the contact.' : 'Side linked to the contact.',
+      });
+    }
 
     if (!autoSave) {
       return NextResponse.json({

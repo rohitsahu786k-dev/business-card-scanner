@@ -103,6 +103,15 @@ export default function Dashboard() {
   const [qrFlash, setQrFlash] = useState(false);
   const inFlightRef = useRef(new Set());
   const projectIdRef = useRef('');
+  // Auto-selected event (Automation Expo 2026) + optional manual override.
+  const [defaultProject, setDefaultProject] = useState(null);
+  const [showDestinationPicker, setShowDestinationPicker] = useState(false);
+  // Two-sided (front + back) capture flow.
+  const [twoSided, setTwoSided] = useState(false);
+  const [pendingCard, setPendingCard] = useState(null); // { contactId, name } after a front capture
+  const [sideBusy, setSideBusy] = useState(false);
+  const twoSidedRef = useRef(false);
+  const pendingCardRef = useRef(null);
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showAdminUserPassword, setShowAdminUserPassword] = useState(false);
@@ -504,8 +513,104 @@ export default function Dashboard() {
     showToast('Photo captured. Details are being extracted in the background.', 'success');
   };
 
+  // Two-sided capture (Section 5). Front is saved first; the returned contact id
+  // is reused so the back merges into the SAME contact instead of a new record.
+  const captureSide = async () => {
+    if (sideBusy || captureLockRef.current) return;
+    if (!projectIdRef.current) {
+      setScanFeedback({ phase: 'error', message: 'Automation Expo 2026 could not be loaded. Please refresh.' });
+      showToast('No destination selected. Please refresh.', 'error');
+      return;
+    }
+    const frame = grabVideoFrame();
+    if (!frame) {
+      setScanFeedback({ phase: 'error', message: 'Camera is not ready yet. Wait a moment and try again.' });
+      return;
+    }
+    const linkId = pendingCardRef.current?.contactId || null;
+    const side = linkId ? 'back' : 'front';
+    captureLockRef.current = true;
+    setTimeout(() => { captureLockRef.current = false; }, 700);
+    if (navigator.vibrate) navigator.vibrate(40);
+    setQrFlash(true);
+    setTimeout(() => setQrFlash(false), 350);
+    setSideBusy(true);
+    setScanFeedback({ phase: 'captured', message: side === 'front' ? 'Front captured. Reading details...' : 'Back captured. Linking to the contact...' });
+    try {
+      let qrFields = null;
+      const qrText = await decodeQrFromDataUrl(frame);
+      if (qrText) {
+        const parsed = parseQrText(qrText);
+        if (isMeaningfulQrContact(parsed)) qrFields = { ...parsed.fields, notes: `Scanned via QR code (${parsed.kind})` };
+      }
+      const image = await compressImageDataUrl(frame);
+      const res = await fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image, qr: qrFields, projectId: projectIdRef.current || null, autoSave: true, side, linkToContactId: linkId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Scan failed');
+
+      setSessionStats(prev => ({
+        count: prev.count + (side === 'front' ? 1 : 0),
+        qr: prev.qr + (data.method === 'qr' ? 1 : 0),
+        ai: prev.ai + (data.method === 'ai' ? 1 : 0),
+        costUsd: prev.costUsd + (data.costUsd || 0),
+      }));
+      fetchContacts();
+      fetchMedia();
+      fetchProjects();
+
+      if (side === 'front') {
+        setPendingCard({ contactId: data.contact._id, name: data.contact.name });
+        setScanFeedback({ phase: 'saved', message: 'Front captured successfully. Flip the card and capture the back — or Save Front Only.' });
+        showToast(data.duplicate ? 'This contact already exists. No duplicate was created.' : 'Front captured successfully.', 'success');
+      } else {
+        setPendingCard(null);
+        setScanFeedback({ phase: 'saved', message: 'Front and back saved to one contact. Show the next card.' });
+        showToast('Back linked — front and back saved as one contact.', 'success');
+      }
+    } catch (err) {
+      setScanFeedback({ phase: 'error', message: err.message || 'Could not read this card. Try again.' });
+      showToast(err.message || 'Could not read this card. Try again.', 'error');
+    } finally {
+      setSideBusy(false);
+    }
+  };
+
+  const saveFrontOnly = () => {
+    setPendingCard(null);
+    setScanFeedback({ phase: 'saved', message: 'Saved front only. Show the next card.' });
+    showToast('Saved — front only.', 'success');
+  };
+
   // Keep a ref of the selected project for the background queue workers
   useEffect(() => { projectIdRef.current = selectedProjectId; }, [selectedProjectId]);
+  useEffect(() => { twoSidedRef.current = twoSided; }, [twoSided]);
+  useEffect(() => { pendingCardRef.current = pendingCard; }, [pendingCard]);
+
+  // Provision + auto-select the default event (Automation Expo 2026) so the
+  // operator never picks a project. Runs once the session is ready.
+  useEffect(() => {
+    if (!session) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/projects/default');
+        if (!res.ok) return;
+        const project = await res.json();
+        if (cancelled || !project?._id) return;
+        setDefaultProject(project);
+        setProjects(prev => (prev.some(p => p._id === project._id) ? prev : [project, ...prev]));
+        setSelectedProjectId(prev => prev || project._id);
+      } catch {
+        // Non-fatal: the manual picker remains available as a fallback.
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session]);
 
   useEffect(() => {
     if (activeTab === 'scan') {
@@ -657,6 +762,26 @@ export default function Dashboard() {
 
   const pendingScans = bulkQueue.filter(i => i.status === 'queued' || i.status === 'processing').length;
   const selectedDestination = projects.find(project => project._id === selectedProjectId) || null;
+
+  // Compact one-line event summary for the read-only scanner badge, e.g.
+  // "22–25 Jul 2026 · Hall 6 · Mumbai". Falls back gracefully for plain projects.
+  const formatEventContext = (project) => {
+    const parts = [];
+    const fmt = (d) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+    if (project.startDate && project.endDate) {
+      const start = new Date(project.startDate);
+      const end = new Date(project.endDate);
+      const year = end.getFullYear();
+      parts.push(`${fmt(start)}–${fmt(end)} ${year}`);
+    } else if (project.eventDate) {
+      parts.push(fmt(project.eventDate) + ' ' + new Date(project.eventDate).getFullYear());
+    }
+    if (project.hall) parts.push(project.hall);
+    if (project.city) parts.push(project.city);
+    else if (project.location) parts.push(project.location);
+    if (!parts.length) parts.push(`${project.contactCount || 0} saved contacts`);
+    return parts.join(' · ');
+  };
 
   const renderQueueTray = () => {
     if (bulkQueue.length === 0) return null;
@@ -1658,50 +1783,60 @@ export default function Dashboard() {
                     </button>
                   </div>
 
-                  {/* Target project — every scan is saved straight to DB + Media */}
+                  {/* Read-only event context — the destination is auto-selected
+                      (Automation Expo 2026); operators never pick a project. */}
                   <section className={`scan-destination-panel ${selectedDestination ? 'selected' : 'required'}`}>
-                    <div className="scan-destination-head">
-                      <div>
-                        <small>Step 1</small>
-                        <h2><i className="fas fa-calendar-check"></i> Select Project / Exhibition</h2>
-                        <p>Every scanned visitor will be grouped here for one-click CSV export.</p>
-                      </div>
-                      <button
-                        type="button"
-                        className="btn-outline"
-                        onClick={() => setProjectModal({ name: '', type: 'exhibition', description: '', eventDate: '', location: '' })}
-                      >
-                        <i className="fas fa-plus"></i> New
-                      </button>
-                    </div>
-                    <select
-                      aria-label="Select project or exhibition"
-                      value={selectedProjectId}
-                      onChange={(event) => {
-                        setSelectedProjectId(event.target.value);
-                        if (event.target.value) setScanFeedback({ phase: 'ready', message: 'Destination selected. Frame the card, then tap Capture.' });
-                      }}
-                    >
-                      <option value="">Choose a project / exhibition...</option>
-                      {projects.map(project => (
-                        <option key={project._id} value={project._id}>
-                          {project.type === 'exhibition' ? 'Exhibition' : 'Project'} — {project.name}
-                        </option>
-                      ))}
-                    </select>
                     {selectedDestination ? (
-                      <div className="selected-destination-summary">
-                        <div>
-                          <strong><i className={`fas ${selectedDestination.type === 'exhibition' ? 'fa-building-columns' : 'fa-folder'}`}></i> {selectedDestination.name}</strong>
-                          <span>{selectedDestination.contactCount || 0} saved contacts{selectedDestination.location ? ` • ${selectedDestination.location}` : ''}</span>
+                      <div className="event-context-badge">
+                        <div className="event-context-main">
+                          <span className="event-context-dot" aria-hidden="true"></span>
+                          <div>
+                            <strong>{selectedDestination.name}</strong>
+                            <span>{formatEventContext(selectedDestination)}</span>
+                          </div>
                         </div>
-                        <button type="button" className="btn-export-event" onClick={handleDownloadBulkCSV}>
-                          <i className="fas fa-file-csv"></i> Export CSV
-                        </button>
+                        <div className="event-context-actions">
+                          <button type="button" className="btn-export-event" onClick={handleDownloadBulkCSV}>
+                            <i className="fas fa-file-csv"></i> Export CSV
+                          </button>
+                          <button
+                            type="button"
+                            className="event-context-change"
+                            onClick={() => setShowDestinationPicker(v => !v)}
+                          >
+                            {showDestinationPicker ? 'Done' : 'Change'}
+                          </button>
+                        </div>
                       </div>
                     ) : (
                       <div className="destination-required-message">
-                        <i className="fas fa-circle-info"></i> Select or create a destination before scanning.
+                        <i className="fas fa-circle-info"></i> Loading Automation Expo 2026…
+                      </div>
+                    )}
+                    {(showDestinationPicker || !selectedDestination) && (
+                      <div className="destination-picker">
+                        <select
+                          aria-label="Select project or exhibition"
+                          value={selectedProjectId}
+                          onChange={(event) => {
+                            setSelectedProjectId(event.target.value);
+                            if (event.target.value) setScanFeedback({ phase: 'ready', message: 'Destination selected. Frame the card, then tap Capture.' });
+                          }}
+                        >
+                          <option value="">Choose a project / exhibition...</option>
+                          {projects.map(project => (
+                            <option key={project._id} value={project._id}>
+                              {project.type === 'exhibition' ? 'Exhibition' : 'Project'} — {project.name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="btn-outline"
+                          onClick={() => setProjectModal({ name: '', type: 'exhibition', description: '', eventDate: '', location: '' })}
+                        >
+                          <i className="fas fa-plus"></i> New
+                        </button>
                       </div>
                     )}
                   </section>
@@ -1760,14 +1895,48 @@ export default function Dashboard() {
                         <span>{scanFeedback.message}</span>
                       </div>
 
+                      <label className="two-sided-toggle">
+                        <input
+                          type="checkbox"
+                          checked={twoSided}
+                          onChange={(e) => { setTwoSided(e.target.checked); setPendingCard(null); }}
+                        />
+                        <span><i className="fas fa-clone"></i> Two-sided card (front + back)</span>
+                      </label>
+
+                      {twoSided && pendingCard && (
+                        <div className="side-prompt" aria-live="polite">
+                          <div>
+                            <strong><i className="fas fa-check-circle"></i> Front captured{pendingCard.name ? `: ${pendingCard.name}` : ''}</strong>
+                            <span>Flip the card and capture the back — or save the front only.</span>
+                          </div>
+                          <button type="button" className="btn-outline" onClick={saveFrontOnly} disabled={sideBusy}>
+                            Save Front Only
+                          </button>
+                        </div>
+                      )}
+
                       <div className="rapid-controls">
                           <button className="rapid-side-btn" onClick={triggerBulkUpload} title="Pick from gallery">
                             <i className="fas fa-images"></i>
                             <span>Gallery</span>
                           </button>
-                          <button className="btn-capture" onClick={() => captureForBackground()} title="Capture card" aria-label="Capture card" disabled={!cameraActive}>
-                            <i className="fas fa-camera"></i>
-                          </button>
+                          {twoSided ? (
+                            <button
+                              className="btn-capture"
+                              onClick={captureSide}
+                              title={pendingCard ? 'Capture back side' : 'Capture front side'}
+                              aria-label={pendingCard ? 'Capture back side' : 'Capture front side'}
+                              disabled={!cameraActive || sideBusy}
+                            >
+                              <i className={`fas ${sideBusy ? 'fa-spinner fa-spin' : 'fa-camera'}`}></i>
+                              <small className="capture-side-label">{pendingCard ? 'Back' : 'Front'}</small>
+                            </button>
+                          ) : (
+                            <button className="btn-capture" onClick={() => captureForBackground()} title="Capture card" aria-label="Capture card" disabled={!cameraActive}>
+                              <i className="fas fa-camera"></i>
+                            </button>
+                          )}
                           <button className="rapid-side-btn" onClick={handleDownloadBulkCSV} title="Download all contacts as CSV">
                             <i className="fas fa-file-csv"></i>
                             <span>CSV</span>
@@ -2494,7 +2663,7 @@ export default function Dashboard() {
         </button>
         <button
           className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''} ${activeTab === 'scan' && cameraActive && !cameraStarting ? 'capture-ready' : ''}`}
-          onClick={() => (activeTab === 'scan' && cameraActive && !cameraStarting ? captureForBackground() : openNavigationTab('scan'))}
+          onClick={() => (activeTab === 'scan' && cameraActive && !cameraStarting ? (twoSided ? captureSide() : captureForBackground()) : openNavigationTab('scan'))}
           aria-label={activeTab === 'scan' && cameraActive && !cameraStarting ? 'Capture card' : 'Open card scanner'}
         >
           <div className="scan-btn-inner">
