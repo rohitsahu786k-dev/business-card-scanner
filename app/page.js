@@ -4,6 +4,16 @@ import { useSession, signOut } from 'next-auth/react';
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Toast from '@/components/Toast';
+import {
+  decodeQrFromImageData,
+  decodeQrFromDataUrl,
+  parseQrText,
+  isMeaningfulQrContact,
+  compressImageDataUrl,
+} from '@/lib/qr';
+
+const MAX_CONCURRENT_SCANS = 2;
+const USD_TO_INR = 84;
 
 export default function Dashboard() {
   const { data: session, update } = useSession();
@@ -53,9 +63,13 @@ export default function Dashboard() {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [profileLoading, setProfileLoading] = useState(false);
-  const [scanMode, setScanMode] = useState('single'); // single | bulk
-  const [bulkQueue, setBulkQueue] = useState([]); // { id, name, preview, status, progress, parsedData, error }
-  const [isBulkProcessing, setIsBulkProcessing] = useState(false);
+  const [scanMode, setScanMode] = useState('rapid'); // rapid | single | bulk
+  const [bulkQueue, setBulkQueue] = useState([]); // { id, name, preview, qrFields, status, contact, costUsd, method, error }
+  const [sessionStats, setSessionStats] = useState({ count: 0, qr: 0, ai: 0, costUsd: 0 });
+  const [qrFlash, setQrFlash] = useState(false);
+  const inFlightRef = useRef(new Set());
+  const lastQrRef = useRef({ text: '', at: 0 });
+  const projectIdRef = useRef('');
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showAdminUserPassword, setShowAdminUserPassword] = useState(false);
@@ -198,6 +212,157 @@ export default function Dashboard() {
     setToast({ message, type });
   };
 
+  // ---------------- BACKGROUND SCAN QUEUE ----------------
+  // Every captured/selected image lands in the queue and is processed in the
+  // background (QR decode first — free & exact; AI fallback). Nothing is kept
+  // locally: each item is uploaded to Cloudinary and saved as Contact + Media.
+  const updateQueueItem = (id, patch) => {
+    setBulkQueue(prev => prev.map(i => (i.id === id ? { ...i, ...patch } : i)));
+  };
+
+  const enqueueScans = (items) => {
+    const stamped = items.map((it, idx) => ({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${idx}`,
+      name: it.name || `Scan ${new Date().toLocaleTimeString()}`,
+      preview: it.preview,
+      qrFields: it.qrFields || null,
+      status: 'queued', // queued | processing | success | failed
+      contact: null,
+      costUsd: null,
+      method: null,
+      error: null,
+    }));
+    setBulkQueue(prev => [...stamped, ...prev]);
+  };
+
+  const runScanItem = async (item) => {
+    updateQueueItem(item.id, { status: 'processing' });
+    try {
+      let qrFields = item.qrFields;
+      if (!qrFields) {
+        const qrText = await decodeQrFromDataUrl(item.preview);
+        if (qrText) {
+          const parsed = parseQrText(qrText);
+          if (isMeaningfulQrContact(parsed)) qrFields = { ...parsed.fields, notes: `Scanned via QR code (${parsed.kind})` };
+        }
+      }
+      const image = await compressImageDataUrl(item.preview);
+      const res = await fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image, qr: qrFields, projectId: projectIdRef.current || null, autoSave: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Scan failed');
+
+      updateQueueItem(item.id, { status: 'success', contact: data.contact, costUsd: data.costUsd, method: data.method });
+      setSessionStats(prev => ({
+        count: prev.count + 1,
+        qr: prev.qr + (data.method === 'qr' ? 1 : 0),
+        ai: prev.ai + (data.method === 'ai' ? 1 : 0),
+        costUsd: prev.costUsd + (data.costUsd || 0),
+      }));
+      fetchContacts();
+      fetchMedia();
+      fetchProjects();
+    } catch (err) {
+      updateQueueItem(item.id, { status: 'failed', error: err.message });
+    } finally {
+      inFlightRef.current.delete(item.id);
+    }
+  };
+
+  const retryQueueItem = (id) => updateQueueItem(id, { status: 'queued', error: null });
+  const clearFinishedQueue = () => setBulkQueue(prev => prev.filter(i => i.status === 'queued' || i.status === 'processing'));
+
+  const grabVideoFrame = () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return null;
+    const canvas = canvasRef.current;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.9);
+  };
+
+  // Rapid capture: snap the frame, push to background queue, keep camera live
+  const captureRapid = () => {
+    const frame = grabVideoFrame();
+    if (!frame) return;
+    if (navigator.vibrate) navigator.vibrate(40);
+    setQrFlash(true);
+    setTimeout(() => setQrFlash(false), 350);
+    enqueueScans([{ preview: frame }]);
+  };
+
+  // Keep a ref of the selected project for the background queue workers
+  useEffect(() => { projectIdRef.current = selectedProjectId; }, [selectedProjectId]);
+
+  // Release the camera whenever the user leaves the scan tab
+  useEffect(() => {
+    if (activeTab !== 'scan' && videoRef.current?.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach(t => t.stop());
+      videoRef.current.srcObject = null;
+      setCameraActive(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  // Auto-run the scan queue with limited concurrency whenever items are waiting
+  useEffect(() => {
+    const active = bulkQueue.filter(i => i.status === 'processing').length;
+    const slots = MAX_CONCURRENT_SCANS - active;
+    if (slots <= 0) return;
+    bulkQueue
+      .filter(i => i.status === 'queued' && !inFlightRef.current.has(i.id))
+      .slice(0, slots)
+      .forEach(item => {
+        inFlightRef.current.add(item.id);
+        runScanItem(item);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bulkQueue]);
+
+  // Live QR auto-detect: while the camera runs, sample frames ~3x/sec. The
+  // moment a contact QR appears it is captured and saved automatically.
+  useEffect(() => {
+    if (!cameraActive || activeTab !== 'scan') return;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const timer = setInterval(() => {
+      const video = videoRef.current;
+      if (!video || video.readyState < 2 || !video.videoWidth) return;
+      const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+      canvas.width = Math.round(video.videoWidth * scale);
+      canvas.height = Math.round(video.videoHeight * scale);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      let text = null;
+      try {
+        text = decodeQrFromImageData(ctx.getImageData(0, 0, canvas.width, canvas.height));
+      } catch { return; }
+      if (!text) return;
+
+      const now = Date.now();
+      if (text === lastQrRef.current.text && now - lastQrRef.current.at < 5000) return; // same QR debounce
+      lastQrRef.current = { text, at: now };
+
+      const parsed = parseQrText(text);
+      if (!isMeaningfulQrContact(parsed)) {
+        showToast('QR detected, but it has no contact info', 'error');
+        return;
+      }
+      const frame = grabVideoFrame();
+      if (!frame) return;
+      if (navigator.vibrate) navigator.vibrate([60, 40, 60]);
+      setQrFlash(true);
+      setTimeout(() => setQrFlash(false), 350);
+      enqueueScans([{ preview: frame, qrFields: { ...parsed.fields, notes: `Scanned via QR code (${parsed.kind})` }, name: parsed.fields.name || 'QR Contact' }]);
+      showToast(`QR captured: ${parsed.fields.name || parsed.fields.company || 'contact'} — saving...`, 'success');
+    }, 320);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraActive, activeTab]);
+
   // ---------------- AUTH CHECK ----------------
   if (!session) {
     return (
@@ -209,6 +374,11 @@ export default function Dashboard() {
 
   // ---------------- CAMERA HANDLERS ----------------
   const startCamera = async () => {
+    // Stop any existing stream before opening a new one
+    if (videoRef.current?.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach(t => t.stop());
+      videoRef.current.srcObject = null;
+    }
     setCameraActive(true);
     setScanPreview(null);
     try {
@@ -270,99 +440,12 @@ export default function Dashboard() {
   const handleBulkFileSelect = (e) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
-
-    const newQueueItems = [];
-    let loadedCount = 0;
-
     files.forEach((file) => {
       const reader = new FileReader();
-      reader.onload = (event) => {
-        newQueueItems.push({
-          id: Math.random().toString(36).substring(2, 9),
-          name: file.name,
-          preview: event.target.result,
-          status: 'queued', // queued | scanning | saving | success | failed
-          progress: 0,
-          parsedData: null,
-          error: null
-        });
-
-        loadedCount++;
-        if (loadedCount === files.length) {
-          setBulkQueue((prev) => [...prev, ...newQueueItems]);
-        }
-      };
+      reader.onload = (event) => enqueueScans([{ name: file.name, preview: event.target.result }]);
       reader.readAsDataURL(file);
     });
-
     e.target.value = '';
-  };
-
-  const handleProcessBulkQueue = async () => {
-    if (isBulkProcessing || bulkQueue.length === 0) return;
-    setIsBulkProcessing(true);
-
-    const items = [...bulkQueue];
-
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].status !== 'queued' && items[i].status !== 'failed') continue;
-
-      // Mark as scanning
-      items[i].status = 'scanning';
-      setBulkQueue([...items]);
-
-      try {
-        // 1. Scan image with AI
-        const scanRes = await fetch('/api/scan', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image: items[i].preview })
-        });
-        const scanData = await scanRes.json();
-        if (!scanRes.ok) throw new Error(scanData.error || 'AI analysis failed');
-
-        // 2. Mark as saving
-        items[i].status = 'saving';
-        setBulkQueue([...items]);
-
-        // 3. Save to Database
-        const contactPayload = {
-          name: scanData.name || 'Unnamed Contact',
-          title: scanData.title || '',
-          company: scanData.company || '',
-          phone: scanData.phone || '',
-          mobile: scanData.mobile || '',
-          email: scanData.email || '',
-          website: scanData.website || '',
-          address: scanData.address || '',
-          cardImage: scanData.cardImage || '',
-          cardImagePublicId: scanData.cardImagePublicId || '',
-          projectId: selectedProjectId || '',
-          notes: 'Auto-imported via Bulk Scan'
-        };
-
-        const saveRes = await fetch('/api/contacts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(contactPayload)
-        });
-        const saveData = await saveRes.json();
-        if (!saveRes.ok) throw new Error(saveData.error || 'Failed to save contact');
-
-        // 4. Success!
-        items[i].status = 'success';
-        items[i].parsedData = contactPayload;
-        setBulkQueue([...items]);
-      } catch (err) {
-        items[i].status = 'failed';
-        items[i].error = err.message;
-        setBulkQueue([...items]);
-      }
-    }
-
-    setIsBulkProcessing(false);
-    fetchContacts(); // Refresh contact list
-    showToast('Bulk processing complete!', 'success');
   };
 
   const handleDownloadBulkCSV = () => {
@@ -373,40 +456,109 @@ export default function Dashboard() {
     window.open(url, '_blank');
   };
 
+  // Single scan: QR-first extract, auto-saved to DB + Media on the server,
+  // then opened in the edit modal for review.
   const handleExtractCard = async () => {
     if (!scanPreview) return;
     setScanning(true);
     try {
+      let qrFields = null;
+      const qrText = await decodeQrFromDataUrl(scanPreview);
+      if (qrText) {
+        const parsed = parseQrText(qrText);
+        if (isMeaningfulQrContact(parsed)) qrFields = { ...parsed.fields, notes: `Scanned via QR code (${parsed.kind})` };
+      }
+      const image = await compressImageDataUrl(scanPreview);
       const res = await fetch('/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: scanPreview })
+        body: JSON.stringify({ image, qr: qrFields, projectId: selectedProjectId || null, autoSave: true }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to extract card details');
 
-      // Card successfully extracted. Switch view to "New Contact" modal
       setScanning(false);
       setScanPreview(null);
-      setEditContact({
-        name: data.name || '',
-        title: data.title || '',
-        company: data.company || '',
-        phone: data.phone || '',
-        mobile: data.mobile || '',
-        email: data.email || '',
-        website: data.website || '',
-        address: data.address || '',
-        cardImage: data.cardImage || '',
-        cardImagePublicId: data.cardImagePublicId || '',
-        projectId: selectedProjectId || '',
-        notes: ''
-      });
-      showToast('Card parsed successfully!', 'success');
+      setSessionStats(prev => ({
+        count: prev.count + 1,
+        qr: prev.qr + (data.method === 'qr' ? 1 : 0),
+        ai: prev.ai + (data.method === 'ai' ? 1 : 0),
+        costUsd: prev.costUsd + (data.costUsd || 0),
+      }));
+      setEditContact(data.contact);
+      fetchContacts();
+      fetchMedia();
+      fetchProjects();
+      showToast(data.method === 'qr' ? 'QR contact saved — FREE scan!' : `Card saved! AI cost $${(data.costUsd || 0).toFixed(4)}`, 'success');
     } catch (err) {
       setScanning(false);
       showToast(err.message, 'error');
     }
+  };
+
+  const formatCost = (usd) => {
+    if (!usd) return 'FREE';
+    return `$${usd.toFixed(4)} (~₹${(usd * USD_TO_INR).toFixed(2)})`;
+  };
+
+  const pendingScans = bulkQueue.filter(i => i.status === 'queued' || i.status === 'processing').length;
+
+  const renderQueueTray = () => {
+    if (bulkQueue.length === 0) return null;
+    return (
+      <div className="scan-queue-tray">
+        <div className="scan-queue-head">
+          <h3>
+            <i className="fas fa-layer-group"></i> Scan Queue
+            {pendingScans > 0 && <span className="queue-live-badge"><span className="live-dot"></span>{pendingScans} processing</span>}
+          </h3>
+          <button className="queue-clear-btn" onClick={clearFinishedQueue} disabled={bulkQueue.every(i => i.status === 'queued' || i.status === 'processing')}>
+            <i className="fas fa-broom"></i> Clear done
+          </button>
+        </div>
+        <div className="scan-queue-list">
+          {bulkQueue.map(item => (
+            <div key={item.id} className={`scan-queue-item ${item.status}`}>
+              <img src={item.preview} alt="scan" />
+              <div className="scan-queue-info">
+                <h4>{item.status === 'success' && item.contact ? item.contact.name : item.name}</h4>
+                {item.status === 'queued' && <span className="q-status"><i className="fas fa-clock"></i> Waiting in queue...</span>}
+                {item.status === 'processing' && <span className="q-status processing"><i className="fas fa-spinner fa-spin"></i> Extracting & saving...</span>}
+                {item.status === 'success' && (
+                  <span className="q-status success">
+                    <i className="fas fa-check-circle"></i> Saved to contacts
+                    {item.contact?.company ? ` • ${item.contact.company}` : ''}
+                  </span>
+                )}
+                {item.status === 'failed' && <span className="q-status failed"><i className="fas fa-exclamation-circle"></i> {item.error}</span>}
+              </div>
+              {item.status === 'success' && (
+                <span className={`cost-chip ${item.method === 'qr' ? 'free' : ''}`}>
+                  {item.method === 'qr' ? <><i className="fas fa-qrcode"></i> FREE</> : `$${(item.costUsd || 0).toFixed(4)}`}
+                </span>
+              )}
+              {item.status === 'failed' && (
+                <button className="queue-retry-btn" onClick={() => retryQueueItem(item.id)} title="Retry">
+                  <i className="fas fa-rotate-right"></i>
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderSessionStats = () => {
+    if (sessionStats.count === 0) return null;
+    return (
+      <div className="session-cost-strip">
+        <div className="session-stat"><strong>{sessionStats.count}</strong><span>Scans</span></div>
+        <div className="session-stat free"><strong>{sessionStats.qr}</strong><span>QR (Free)</span></div>
+        <div className="session-stat"><strong>{sessionStats.ai}</strong><span>AI Scans</span></div>
+        <div className="session-stat cost"><strong>{sessionStats.costUsd ? `$${sessionStats.costUsd.toFixed(4)}` : '$0'}</strong><span>≈ ₹{(sessionStats.costUsd * USD_TO_INR).toFixed(2)} total</span></div>
+      </div>
+    );
   };
 
   // ---------------- CONTACT CRUD OPERATIONS ----------------
@@ -668,6 +820,7 @@ export default function Dashboard() {
               website: item.website || '',
               address: item.address || '',
               notes: item.notes || 'Imported file',
+              scanMethod: 'import',
               projectId: selectedProjectId || null
             })
           });
@@ -783,9 +936,9 @@ export default function Dashboard() {
             <span>Media Gallery</span>
             <span className="badge">{mediaItems.length}</span>
           </button>
-          <button className={`nav-item ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => { setActiveTab('scan'); setMobileMenuOpen(false); startCamera(); }}>
-            <i className="fas fa-expand"></i>
-            <span>Scan Business Card</span>
+          <button className={`nav-item ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => { setActiveTab('scan'); setMobileMenuOpen(false); setScanMode('rapid'); startCamera(); }}>
+            <i className="fas fa-qrcode"></i>
+            <span>Scan Card / QR</span>
           </button>
 
           <div className="nav-section">Account</div>
@@ -857,7 +1010,7 @@ export default function Dashboard() {
                 <button className="icon-btn" onClick={() => setToolsModalOpen(true)} title="Import / Export Data">
                   <i className="fas fa-file-import"></i>
                 </button>
-                <button className="btn-sm btn-quick-scan" onClick={() => { setActiveTab('scan'); startCamera(); }}>
+                <button className="btn-sm btn-quick-scan" onClick={() => { setActiveTab('scan'); setScanMode('rapid'); startCamera(); }}>
                   <i className="fas fa-camera"></i>
                   <span>Quick Scan</span>
                 </button>
@@ -931,7 +1084,7 @@ export default function Dashboard() {
                       <div className="empty-icon"><i className="fas fa-id-card"></i></div>
                       <h2>No contacts found</h2>
                       <p>Try resetting filters, searching for something else, or scan a new business card.</p>
-                      <button className="btn-primary" onClick={() => { setActiveTab('scan'); startCamera(); }} style={{ maxWidth: '200px', margin: '0 auto' }}>
+                      <button className="btn-primary" onClick={() => { setActiveTab('scan'); setScanMode('rapid'); startCamera(); }} style={{ maxWidth: '200px', margin: '0 auto' }}>
                         <i className="fas fa-camera"></i> Scan Card Now
                       </button>
                     </div>
@@ -1222,32 +1375,109 @@ export default function Dashboard() {
               {/* ============ SCAN TAB ============ */}
               {activeTab === 'scan' && (
                 <div style={{ maxWidth: '600px', margin: '0 auto' }}>
-                  {/* Segment Switcher */}
-                  <div className="tab-segment" style={{ display: 'flex', borderRadius: '12px', background: '#f1f3f5', padding: '4px', marginBottom: '20px' }}>
-                    <button 
-                      type="button" 
-                      className={`segment-btn ${scanMode === 'single' ? 'active' : ''}`}
-                      onClick={() => setScanMode('single')}
-                      style={{ flex: 1, padding: '10px', borderRadius: '8px', border: 'none', background: scanMode === 'single' ? '#fff' : 'transparent', fontWeight: '600', fontSize: '13px', color: scanMode === 'single' ? 'var(--red)' : 'var(--text2)', cursor: 'pointer', transition: 'var(--transition)' }}
+                  {/* Mode Switcher: Rapid (camera + live QR) | Single | Bulk */}
+                  <div className="scan-mode-chips">
+                    <button
+                      type="button"
+                      className={scanMode === 'rapid' ? 'active' : ''}
+                      onClick={() => { setScanMode('rapid'); setScanPreview(null); startCamera(); }}
                     >
-                      <i className="fas fa-camera" style={{ marginRight: '6px' }}></i> Single Scan
+                      <i className="fas fa-bolt"></i> Rapid Scan
                     </button>
-                    <button 
-                      type="button" 
-                      className={`segment-btn ${scanMode === 'bulk' ? 'active' : ''}`}
-                      onClick={() => { setScanMode('bulk'); stopCamera(); }}
-                      style={{ flex: 1, padding: '10px', borderRadius: '8px', border: 'none', background: scanMode === 'bulk' ? '#fff' : 'transparent', fontWeight: '600', fontSize: '13px', color: scanMode === 'bulk' ? 'var(--red)' : 'var(--text2)', cursor: 'pointer', transition: 'var(--transition)' }}
+                    <button
+                      type="button"
+                      className={scanMode === 'single' ? 'active' : ''}
+                      onClick={() => { setScanMode('single'); stopCamera(); }}
                     >
-                      <i className="fas fa-images" style={{ marginRight: '6px' }}></i> Bulk Upload
+                      <i className="fas fa-camera"></i> Single
+                    </button>
+                    <button
+                      type="button"
+                      className={scanMode === 'bulk' ? 'active' : ''}
+                      onClick={() => { setScanMode('bulk'); stopCamera(); }}
+                    >
+                      <i className="fas fa-images"></i> Bulk Upload
                     </button>
                   </div>
 
-                  {scanMode === 'single' ? (
+                  {/* Target project — every scan is saved straight to DB + Media */}
+                  <div className="scan-target-row">
+                    <label><i className="fas fa-folder"></i> Save scans to</label>
+                    <select value={selectedProjectId} onChange={(e) => setSelectedProjectId(e.target.value)}>
+                      <option value="">Personal Contacts (No Project)</option>
+                      {projects.map(p => (
+                        <option key={p._id} value={p._id}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {renderSessionStats()}
+
+                  {/* Shared hidden multi-file input (Rapid gallery + Bulk upload) */}
+                  <input
+                    type="file"
+                    ref={bulkFileInputRef}
+                    multiple
+                    style={{ display: 'none' }}
+                    accept="image/*"
+                    onChange={handleBulkFileSelect}
+                  />
+
+                  {scanMode === 'rapid' ? (
+                    <div className="rapid-scan-area">
+                      <div className={`scan-preview rapid ${qrFlash ? 'flash' : ''}`}>
+                        {cameraActive ? (
+                          <>
+                            <video ref={videoRef} autoPlay playsInline muted></video>
+                            <div className="scan-frame">
+                              <span className="corner tl"></span>
+                              <span className="corner tr"></span>
+                              <span className="corner bl"></span>
+                              <span className="corner br"></span>
+                              <div className="scan-line"></div>
+                            </div>
+                            <div className="qr-live-pill">
+                              <span className="live-dot"></span> QR auto-detect ON
+                            </div>
+                          </>
+                        ) : (
+                          <div className="camera-off-state">
+                            <i className="fas fa-camera"></i>
+                            <p>Camera is off</p>
+                            <button className="btn-primary" onClick={startCamera} style={{ width: 'auto', padding: '10px 24px' }}>
+                              <i className="fas fa-video"></i> Start Camera
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {cameraActive && (
+                        <div className="rapid-controls">
+                          <button className="rapid-side-btn" onClick={triggerBulkUpload} title="Pick from gallery">
+                            <i className="fas fa-images"></i>
+                            <span>Gallery</span>
+                          </button>
+                          <button className="btn-capture" onClick={captureRapid} title="Capture card">
+                            <i className="fas fa-camera"></i>
+                          </button>
+                          <button className="rapid-side-btn" onClick={stopCamera} title="Stop camera">
+                            <i className="fas fa-video-slash"></i>
+                            <span>Stop</span>
+                          </button>
+                        </div>
+                      )}
+
+                      <p className="rapid-hint">
+                        <i className="fas fa-bolt"></i>
+                        Point at a <strong>QR code</strong> — it saves automatically (free). For printed cards, tap the shutter and keep going — everything processes in the background.
+                      </p>
+                    </div>
+                  ) : scanMode === 'single' ? (
                     scanning ? (
                       <div className="extracting-state">
                         <div className="pulse"></div>
-                        <h2>Analyzing Business Card...</h2>
-                        <p>OpenAI GPT-4o Vision model is reading the text, detecting fields, and extracting information details...</p>
+                        <h2>Scanning Card...</h2>
+                        <p>Checking for a QR code first (free), then reading the card with AI vision — the contact and image are saved to your database automatically.</p>
                       </div>
                     ) : (
                       <div className="scan-area">
@@ -1298,7 +1528,7 @@ export default function Dashboard() {
                         {scanPreview && (
                           <div style={{ display: 'flex', gap: '10px', width: '100%', marginTop: '10px' }}>
                             <button className="btn-primary" onClick={handleExtractCard} style={{ flex: 1 }}>
-                              <i className="fas fa-magic"></i> Extract Card Details
+                              <i className="fas fa-magic"></i> Extract & Save
                             </button>
                             <button className="btn-outline" onClick={() => setScanPreview(null)} style={{ flex: 1 }}>
                               Discard
@@ -1317,98 +1547,17 @@ export default function Dashboard() {
                     )
                   ) : (
                     /* Bulk Scan Mode Panel */
-                    <div className="bulk-scan-area" style={{ background: '#fff', borderRadius: '16px', border: '1px solid var(--border)', padding: '20px' }}>
-                      <div className="form-group" style={{ marginBottom: '16px' }}>
-                        <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)', display: 'block', marginBottom: '6px' }}>Target Project for Scans</label>
-                        <select 
-                          value={selectedProjectId} 
-                          onChange={(e) => setSelectedProjectId(e.target.value)}
-                          style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '14px', outline: 'none' }}
-                        >
-                          <option value="">Personal Contacts (No Project)</option>
-                          {projects.map(p => (
-                            <option key={p._id} value={p._id}>{p.name}</option>
-                          ))}
-                        </select>
+                    <div className="bulk-scan-area">
+                      <div className="bulk-upload-box" onClick={triggerBulkUpload}>
+                        <i className="fas fa-cloud-upload-alt"></i>
+                        <h3>Select Card / QR Images</h3>
+                        <p>Pick multiple images — they queue up and process automatically in the background. QR codes decode free; printed cards use AI.</p>
                       </div>
-
-                      <div className="bulk-upload-box" onClick={triggerBulkUpload} style={{ border: '2px dashed var(--border)', borderRadius: '12px', padding: '30px 16px', textAlign: 'center', cursor: 'pointer', background: '#fafafa', transition: 'var(--transition)', marginBottom: '20px' }}>
-                        <i className="fas fa-cloud-upload-alt" style={{ fontSize: '40px', color: 'var(--red)', marginBottom: '10px' }}></i>
-                        <h3 style={{ fontSize: '15px', fontWeight: '600', marginBottom: '4px' }}>Select Business Card Images</h3>
-                        <p style={{ fontSize: '12px', color: 'var(--text3)' }}>Select multiple images to batch process with AI</p>
-                        <input 
-                          type="file" 
-                          ref={bulkFileInputRef} 
-                          multiple 
-                          style={{ display: 'none' }} 
-                          accept="image/*" 
-                          onChange={handleBulkFileSelect} 
-                        />
-                      </div>
-
-                      {bulkQueue.length > 0 && (
-                        <>
-                          <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
-                            <button 
-                              className="btn-primary" 
-                              onClick={handleProcessBulkQueue} 
-                              disabled={isBulkProcessing}
-                              style={{ flex: 2 }}
-                            >
-                              {isBulkProcessing ? (
-                                <>
-                                  <span className="spinner" style={{ marginRight: '8px' }}></span>
-                                  Processing ({bulkQueue.filter(q => q.status === 'scanning' || q.status === 'saving').length + 1}/{bulkQueue.length})...
-                                </>
-                              ) : (
-                                <>
-                                  <i className="fas fa-play" style={{ marginRight: '8px' }}></i> Start Bulk AI Scan ({bulkQueue.filter(q => q.status === 'queued' || q.status === 'failed').length} left)
-                                </>
-                              )}
-                            </button>
-                            <button 
-                              className="btn-outline" 
-                              onClick={() => setBulkQueue([])} 
-                              disabled={isBulkProcessing}
-                              style={{ flex: 1 }}
-                            >
-                              <i className="fas fa-trash-can"></i> Clear
-                            </button>
-                          </div>
-
-                          <div className="bulk-queue-list" style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '350px', overflowY: 'auto', paddingRight: '4px' }}>
-                            {bulkQueue.map((item) => (
-                              <div key={item.id} className="bulk-queue-card" style={{ background: '#fcfcfc', border: '1px solid var(--border)', borderRadius: '10px', padding: '10px', display: 'flex', gap: '10px', alignItems: 'center' }}>
-                                <img src={item.preview} style={{ width: '50px', height: '50px', borderRadius: '6px', objectFit: 'cover', border: '1px solid var(--border)' }} alt="Preview" />
-                                <div style={{ flex: 1, minWidth: 0 }}>
-                                  <h4 style={{ fontSize: '13px', fontWeight: '600', margin: '0 0 2px 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</h4>
-                                  {item.status === 'queued' && <span style={{ fontSize: '11px', color: 'var(--text3)' }}><i className="fas fa-clock"></i> Queued</span>}
-                                  {item.status === 'scanning' && <span style={{ fontSize: '11px', color: 'var(--red)', fontWeight: '500' }}><i className="fas fa-spinner fa-spin"></i> Analyzing (AI)...</span>}
-                                  {item.status === 'saving' && <span style={{ fontSize: '11px', color: 'var(--red)', fontWeight: '500' }}><i className="fas fa-spinner fa-spin"></i> Saving...</span>}
-                                  {item.status === 'success' && (
-                                    <div>
-                                      <span style={{ fontSize: '11px', color: '#10b981', fontWeight: '600', display: 'block' }}>
-                                        <i className="fas fa-check-circle"></i> Saved successfully
-                                      </span>
-                                      {item.parsedData && (
-                                        <p style={{ fontSize: '11px', color: 'var(--text3)', margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                          <strong>{item.parsedData.name}</strong> • {item.parsedData.title} at {item.parsedData.company}
-                                        </p>
-                                      )}
-                                    </div>
-                                  )}
-                                  {item.status === 'failed' && <span style={{ fontSize: '11px', color: '#ef4444', fontWeight: '500' }}><i className="fas fa-exclamation-circle"></i> Error: {item.error}</span>}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </>
-                      )}
 
                       {bulkQueue.some(item => item.status === 'success') && (
                         <div style={{ marginTop: '20px', padding: '12px', background: 'rgba(230,50,50,0.05)', borderRadius: '10px', border: '1px solid rgba(230,50,50,0.15)', display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'center', textAlign: 'center' }}>
                           <p style={{ fontSize: '12px', color: 'var(--red)', fontWeight: '600', margin: 0 }}>
-                            <i className="fas fa-file-csv"></i> batch contacts saved dynamically in database!
+                            <i className="fas fa-file-csv"></i> Batch contacts saved to your database & media gallery!
                           </p>
                           <button 
                             onClick={handleDownloadBulkCSV} 
@@ -1421,6 +1570,8 @@ export default function Dashboard() {
                       )}
                     </div>
                   )}
+
+                  {renderQueueTray()}
                 </div>
               )}
 
@@ -1614,6 +1765,13 @@ export default function Dashboard() {
                 <h2>{viewContact.name}</h2>
                 {viewContact.title && <p className="detail-title">{viewContact.title}</p>}
                 {viewContact.company && <p className="detail-company">{viewContact.company}</p>}
+                {viewContact.scanMethod && viewContact.scanMethod !== 'manual' && (
+                  <span className={`scan-method-badge ${viewContact.scanMethod}`}>
+                    {viewContact.scanMethod === 'qr' && <><i className="fas fa-qrcode"></i> QR Scan • FREE</>}
+                    {viewContact.scanMethod === 'ai' && <><i className="fas fa-wand-magic-sparkles"></i> AI Scan • {formatCost(viewContact.scanCost)}</>}
+                    {viewContact.scanMethod === 'import' && <><i className="fas fa-file-import"></i> Imported</>}
+                  </span>
+                )}
               </div>
 
               {viewContact.cardImage && (
@@ -1986,7 +2144,7 @@ export default function Dashboard() {
           <i className="fas fa-folder"></i>
           <span>Projects</span>
         </button>
-        <button className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => { setActiveTab('scan'); startCamera(); }}>
+        <button className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => { setActiveTab('scan'); setScanMode('rapid'); startCamera(); }}>
           <div className="scan-btn-inner">
             <i className="fas fa-camera"></i>
           </div>

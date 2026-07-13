@@ -15,6 +15,8 @@ const ContactSchema = new mongoose.Schema({
   cardImage: { type: String, default: '' },
   cardImagePublicId: { type: String, default: '' },
   favorite: { type: Boolean, default: false },
+  scanMethod: { type: String, enum: ['ai', 'qr', 'manual', 'import'], default: 'manual' },
+  scanCost: { type: Number, default: 0 }, // USD cost of the AI extraction for this scan
 }, { timestamps: true });
 
 export default mongoose.models.Contact || mongoose.model('Contact', ContactSchema);

@@ -803,3 +803,158 @@ input,textarea,select{font-family:inherit}
     flex: 1;
   }
 }
+
+/* ============================================================
+   SCAN 2.0 — QR + Rapid + Background Queue + Cost Tracking
+   ============================================================ */
+
+/* Mode chips */
+.scan-mode-chips{display:flex;gap:8px;padding:5px;background:#eef1f6;border-radius:16px;margin-bottom:16px}
+.scan-mode-chips button{flex:1;display:flex;align-items:center;justify-content:center;gap:7px;padding:11px 8px;border:none;border-radius:12px;background:transparent;font-size:13px;font-weight:600;color:var(--text2);transition:var(--transition);font-family:inherit}
+.scan-mode-chips button i{font-size:13px}
+.scan-mode-chips button.active{background:#fff;color:var(--red);box-shadow:0 2px 8px rgba(15,23,42,.08)}
+.scan-mode-chips button:active{transform:scale(.97)}
+
+/* Target project row */
+.scan-target-row{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid var(--border);border-radius:14px;padding:10px 14px;margin-bottom:14px}
+.scan-target-row label{font-size:12px;font-weight:600;color:var(--text2);white-space:nowrap;display:flex;align-items:center;gap:6px}
+.scan-target-row label i{color:var(--red)}
+.scan-target-row select{flex:1;border:none;outline:none;background:transparent;font-size:14px;font-weight:500;color:var(--text);cursor:pointer;font-family:inherit;min-width:0}
+
+/* Session cost strip */
+.session-cost-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px}
+.session-stat{background:#fff;border:1px solid var(--border);border-radius:14px;padding:10px 6px;text-align:center;display:flex;flex-direction:column;gap:2px}
+.session-stat strong{font-size:16px;font-weight:700;color:var(--text)}
+.session-stat span{font-size:10px;color:var(--text3);font-weight:500;text-transform:uppercase;letter-spacing:.4px}
+.session-stat.free strong{color:#10b981}
+.session-stat.cost strong{color:var(--red)}
+
+/* Rapid scan area */
+.rapid-scan-area{display:flex;flex-direction:column;gap:16px}
+.scan-preview.rapid{max-width:none;aspect-ratio:3/4;max-height:56vh;border-radius:22px;box-shadow:0 16px 40px rgba(15,23,42,.18)}
+@media(min-width:768px){.scan-preview.rapid{aspect-ratio:16/10;max-height:420px}}
+.scan-preview.rapid.flash::after{content:'';position:absolute;inset:0;background:#fff;animation:shutterFlash .35s ease-out forwards;z-index:5;pointer-events:none}
+@keyframes shutterFlash{from{opacity:.85}to{opacity:0}}
+.qr-live-pill{position:absolute;top:14px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:7px;background:rgba(15,23,42,.65);backdrop-filter:blur(8px);color:#fff;font-size:11px;font-weight:600;padding:7px 14px;border-radius:30px;letter-spacing:.3px;z-index:4;white-space:nowrap}
+.live-dot{width:7px;height:7px;border-radius:50%;background:#22c55e;animation:livePulse 1.4s ease-in-out infinite}
+@keyframes livePulse{0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(34,197,94,.5)}50%{opacity:.6;box-shadow:0 0 0 5px rgba(34,197,94,0)}}
+.camera-off-state{display:flex;height:100%;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:#94a3b8}
+.camera-off-state i{font-size:38px;opacity:.6}
+.camera-off-state p{font-size:14px}
+
+/* Rapid controls */
+.rapid-controls{display:flex;align-items:center;justify-content:center;gap:34px}
+.rapid-side-btn{display:flex;flex-direction:column;align-items:center;gap:5px;border:none;background:none;color:var(--text2);font-size:18px;font-family:inherit;padding:6px;transition:var(--transition)}
+.rapid-side-btn span{font-size:11px;font-weight:600}
+.rapid-side-btn:active{transform:scale(.92);color:var(--red)}
+.rapid-controls .btn-capture{width:72px;height:72px;font-size:24px;border:5px solid #fff;box-shadow:0 8px 26px rgba(230,50,50,.45),0 0 0 2px rgba(230,50,50,.25)}
+.rapid-hint{display:flex;align-items:flex-start;gap:10px;font-size:12.5px;line-height:1.55;color:var(--text2);background:rgba(230,50,50,.05);border:1px solid rgba(230,50,50,.12);padding:12px 14px;border-radius:14px}
+.rapid-hint i{color:var(--red);margin-top:2px}
+
+/* Scan queue tray */
+.scan-queue-tray{background:#fff;border:1px solid var(--border);border-radius:18px;overflow:hidden;margin-top:18px;box-shadow:var(--shadow-sm);animation:fadeUp .3s ease}
+.scan-queue-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border);background:#fafbfc}
+.scan-queue-head h3{font-size:13.5px;font-weight:700;display:flex;align-items:center;gap:8px;color:var(--text)}
+.scan-queue-head h3 i{color:var(--red)}
+.queue-live-badge{display:inline-flex;align-items:center;gap:6px;background:rgba(34,197,94,.1);color:#16a34a;font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px}
+.queue-clear-btn{border:none;background:none;color:var(--text3);font-size:12px;font-weight:600;display:flex;align-items:center;gap:5px;font-family:inherit;padding:6px 8px;border-radius:8px;transition:var(--transition)}
+.queue-clear-btn:hover:not(:disabled){color:var(--red);background:var(--red-light)}
+.queue-clear-btn:disabled{opacity:.4;cursor:not-allowed}
+.scan-queue-list{max-height:340px;overflow-y:auto;display:flex;flex-direction:column}
+.scan-queue-item{display:flex;align-items:center;gap:12px;padding:11px 16px;border-bottom:1px solid #f1f5f9;transition:background .2s}
+.scan-queue-item:last-child{border-bottom:none}
+.scan-queue-item img{width:46px;height:46px;border-radius:10px;object-fit:cover;border:1px solid var(--border);flex-shrink:0}
+.scan-queue-item.processing{background:linear-gradient(90deg,rgba(230,50,50,.03),transparent)}
+.scan-queue-info{flex:1;min-width:0}
+.scan-queue-info h4{font-size:13px;font-weight:600;margin:0 0 3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.q-status{font-size:11.5px;color:var(--text3);display:inline-flex;align-items:center;gap:5px}
+.q-status.processing{color:var(--red);font-weight:600}
+.q-status.success{color:#10b981;font-weight:600}
+.q-status.failed{color:#ef4444;font-weight:600}
+.cost-chip{flex-shrink:0;font-size:10.5px;font-weight:700;padding:5px 10px;border-radius:20px;background:#f1f5f9;color:var(--text2);letter-spacing:.2px;display:inline-flex;align-items:center;gap:5px}
+.cost-chip.free{background:rgba(34,197,94,.12);color:#16a34a}
+.queue-retry-btn{flex-shrink:0;width:32px;height:32px;border:1px solid var(--border);background:#fff;border-radius:10px;color:var(--text2);font-size:12px;transition:var(--transition)}
+.queue-retry-btn:hover{color:var(--red);border-color:var(--red)}
+
+/* Scan method badge in contact detail */
+.scan-method-badge{display:inline-flex;align-items:center;gap:6px;margin-top:8px;font-size:11px;font-weight:700;padding:5px 12px;border-radius:20px;letter-spacing:.3px}
+.scan-method-badge.qr{background:rgba(34,197,94,.1);color:#16a34a}
+.scan-method-badge.ai{background:rgba(139,92,246,.1);color:#8b5cf6}
+.scan-method-badge.import{background:rgba(59,130,246,.1);color:#3b82f6}
+
+/* Bulk area */
+.bulk-scan-area{background:#fff;border-radius:18px;border:1px solid var(--border);padding:20px}
+.bulk-upload-box{border:2px dashed #dbe2ec;border-radius:16px;padding:34px 18px;text-align:center;cursor:pointer;background:#fafbfd;transition:var(--transition)}
+.bulk-upload-box:hover{border-color:var(--red);background:rgba(230,50,50,.03)}
+.bulk-upload-box i{font-size:40px;color:var(--red);margin-bottom:12px}
+.bulk-upload-box h3{font-size:15px;font-weight:700;margin-bottom:6px}
+.bulk-upload-box p{font-size:12.5px;color:var(--text3);line-height:1.5;max-width:340px;margin:0 auto}
+
+/* ============================================================
+   MOBILE APP UI 2.0 — Dribbble-grade polish
+   ============================================================ */
+@media(max-width:768px){
+  body{background:#f4f6fa}
+
+  .page-content{padding:16px 16px 24px}
+
+  /* Contact rows -> floating cards */
+  .contact-grid{gap:10px}
+  .contact-row{padding:14px;border-radius:18px;border:none;box-shadow:0 2px 10px rgba(15,23,42,.06)}
+  .contact-row:hover{transform:none}
+  .contact-row:active{transform:scale(.985);box-shadow:0 1px 4px rgba(15,23,42,.08)}
+  .contact-avatar{width:48px;height:48px;font-size:17px;box-shadow:0 4px 10px rgba(230,50,50,.25)}
+  .contact-details h3{font-size:15px}
+  .contact-actions button{width:38px;height:38px;border-radius:12px;border:none;background:#f4f6fa}
+
+  /* Project cards */
+  .project-grid{grid-template-columns:1fr;gap:12px}
+  .project-card{border-radius:18px;border:none;box-shadow:0 2px 10px rgba(15,23,42,.06)}
+
+  /* Media grid */
+  .media-grid{grid-template-columns:repeat(2,1fr);gap:12px}
+  .media-card{border-radius:16px;border:none;box-shadow:0 2px 10px rgba(15,23,42,.06)}
+  .media-card-img-container{height:120px}
+
+  /* Profile sections */
+  .profile-section{border-radius:18px;border:none;box-shadow:0 2px 10px rgba(15,23,42,.06);padding:20px}
+
+  /* Empty states */
+  .empty-state{padding:48px 20px}
+  .empty-icon{width:88px;height:88px;font-size:34px;box-shadow:0 8px 24px rgba(230,50,50,.12)}
+
+  /* Modals become bottom sheets */
+  .modal-overlay{align-items:flex-end}
+  .modal-box{margin:0;max-width:100%;width:100%;border-radius:24px 24px 0 0;max-height:92dvh;animation:sheetUp .32s cubic-bezier(.32,.72,.24,1)}
+  .modal-box::before{content:'';display:block;width:44px;height:5px;border-radius:3px;background:#e2e8f0;margin:10px auto 0}
+  .modal-head{padding:14px 20px}
+  .modal-body{padding:20px;padding-bottom:8px}
+  .modal-footer{padding:14px 20px;padding-bottom:calc(14px + env(safe-area-inset-bottom,0px))}
+  .modal-footer .btn-primary,.modal-footer .btn-outline{flex:1;justify-content:center}
+
+  /* Scan screen mobile tuning */
+  .session-cost-strip{grid-template-columns:repeat(4,1fr)}
+  .session-stat{border:none;box-shadow:0 2px 8px rgba(15,23,42,.05)}
+  .scan-target-row{border:none;box-shadow:0 2px 8px rgba(15,23,42,.05)}
+  .scan-queue-tray{border:none;box-shadow:0 4px 16px rgba(15,23,42,.08);margin-bottom:8px}
+  .rapid-controls{gap:44px;padding:4px 0}
+  .rapid-controls .btn-capture{width:78px;height:78px}
+  .scan-area{padding:0}
+  .scan-preview{border-radius:20px}
+
+  /* Toast above the dock */
+  .toast{bottom:96px;left:16px;right:16px;justify-content:center;border-radius:16px;box-shadow:0 10px 30px rgba(15,23,42,.16)}
+
+  /* Auth pages */
+  .auth-card{border-radius:24px;box-shadow:0 20px 50px rgba(15,23,42,.10)}
+
+  /* Table on mobile */
+  .table-wrap{border:none;box-shadow:0 2px 10px rgba(15,23,42,.06);border-radius:16px}
+}
+
+@keyframes sheetUp{from{transform:translateY(60%);opacity:.6}to{transform:none;opacity:1}}
+
+@media(max-width:380px){
+  .session-cost-strip{grid-template-columns:repeat(2,1fr)}
+  .rapid-controls{gap:28px}
+}
