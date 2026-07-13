@@ -7,6 +7,8 @@ import Contact from '@/models/Contact';
 import Media from '@/models/Media';
 import Project from '@/models/Project';
 import { deleteImage, uploadImage } from '@/lib/cloudinary';
+import { buildDedupeKeys } from '@/lib/normalize';
+import { findStrongDuplicate, mergeMissingFields } from '@/lib/dedupe';
 
 // Cloudinary upload + AI vision together can exceed Vercel's default function
 // timeout, which surfaced as scans that never saved. Allow up to 60s.
@@ -79,7 +81,11 @@ export async function POST(req) {
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   try {
-    const { image, qr, projectId, autoSave, notes, requestId } = await req.json();
+    const { image, qr, projectId, autoSave, notes, requestId, side, linkToContactId } = await req.json();
+    const cardSide = side === 'back' ? 'back' : 'front';
+    if (linkToContactId && (typeof linkToContactId !== 'string' || !mongoose.isValidObjectId(linkToContactId))) {
+      return NextResponse.json({ error: 'Invalid contact link ID' }, { status: 400 });
+    }
     if (typeof image !== 'string' || !image.startsWith('data:image/')) {
       return NextResponse.json({ error: 'A valid card image is required' }, { status: 400 });
     }
@@ -145,9 +151,11 @@ export async function POST(req) {
       method = 'ai';
     }
 
+    // When linking a second side to an existing contact, a logo-only or
+    // QR-only image is still a valid back — skip the "no readable info" gate.
     const hasDirectContact = Boolean(info.email || info.phone || info.mobile || info.website);
     const hasIdentityContext = Boolean((info.name && (info.title || info.company || info.address)) || (info.company && info.address));
-    if (!hasDirectContact && !hasIdentityContext) {
+    if (!linkToContactId && !hasDirectContact && !hasIdentityContext) {
       await deleteImage(publicId).catch(() => undefined);
       return NextResponse.json(
         { error: 'No readable contact information was found. Hold the card steady and try again.' },
@@ -156,6 +164,44 @@ export async function POST(req) {
     }
 
     costUsd = Math.round(costUsd * 1e6) / 1e6;
+
+    // ---- Link a second side (back) to an existing contact (Section 5) ----
+    // No new contact is created; we append the image and fill only blank fields.
+    if (linkToContactId) {
+      const target = await Contact.findOne({ _id: linkToContactId, userId: session.user.id });
+      if (!target) {
+        await deleteImage(publicId).catch(() => undefined);
+        return NextResponse.json({ error: 'The contact to attach this side to was not found' }, { status: 404 });
+      }
+      const patch = { ...mergeMissingFields(target, info) };
+      if (Object.keys(patch).length) Object.assign(patch, buildDedupeKeys({ ...target.toObject(), ...patch }));
+      const sizeKb = Math.round((image.length * 0.75) / 1024);
+      const updated = await Contact.findByIdAndUpdate(
+        target._id,
+        {
+          $set: { ...patch, lastSeenAt: new Date() },
+          $inc: { scanCost: costUsd },
+          $push: { cardImages: { side: cardSide, url, publicId, scanMethod: method, capturedAt: new Date() } },
+        },
+        { new: true },
+      );
+      await Media.create({
+        userId: session.user.id,
+        title: `${updated.name}${updated.company ? ' — ' + updated.company : ''} (${cardSide})`,
+        url, publicId, fileSize: `${sizeKb} KB`, fileType: 'image/jpeg',
+        contactId: updated._id, projectId: projectId || null, side: cardSide, scanMethod: method,
+      }).catch(() => undefined);
+
+      return NextResponse.json({
+        saved: true,
+        linked: true,
+        side: cardSide,
+        contact: updated,
+        costUsd,
+        method,
+        message: cardSide === 'back' ? 'Back side captured and linked to the contact.' : 'Side linked to the contact.',
+      });
+    }
 
     if (!autoSave) {
       return NextResponse.json({
@@ -168,7 +214,48 @@ export async function POST(req) {
       });
     }
 
+    const sizeInKb = Math.round((image.length * 0.75) / 1024);
+    const cardImageEntry = { side: cardSide, url, publicId, scanMethod: method, capturedAt: new Date() };
+
+    // Server-side duplicate prevention (Section 6). If this card strongly
+    // matches an existing contact (same email / mobile / phone+name), we link
+    // the new image and fill blanks instead of creating a second record.
+    const dupe = await findStrongDuplicate(session.user.id, info);
+    if (dupe) {
+      const patch = { ...mergeMissingFields(dupe, info) };
+      if (Object.keys(patch).length) Object.assign(patch, buildDedupeKeys({ ...dupe.toObject(), ...patch }));
+
+      const alreadyHasSide = (dupe.cardImages || []).some(img => img.side === cardSide);
+      const update = {
+        $set: { ...patch, lastSeenAt: new Date() },
+        $inc: { scanCount: 1 },
+      };
+      if (projectId) update.$addToSet = { seenAtProjects: projectId };
+      if (!alreadyHasSide || !dupe.cardImages?.length) {
+        update.$push = { ...(update.$push || {}), cardImages: cardImageEntry };
+      }
+      const updated = await Contact.findByIdAndUpdate(dupe._id, update, { new: true });
+
+      await Media.create({
+        userId: session.user.id,
+        title: `${updated.name}${updated.company ? ' — ' + updated.company : ''}`,
+        url, publicId, fileSize: `${sizeInKb} KB`, fileType: 'image/jpeg',
+        contactId: updated._id, projectId: projectId || null, side: cardSide,
+        scanMethod: method, duplicateStatus: 'merged',
+      }).catch(() => undefined);
+
+      return NextResponse.json({
+        saved: true,
+        duplicate: true,
+        contact: updated,
+        linkedImage: !alreadyHasSide,
+        message: 'This contact already exists. No duplicate was created.',
+        method,
+      });
+    }
+
     // Auto-save: persist Contact + linked Media record in one shot
+    const dedupe = buildDedupeKeys(info);
     const contact = await Contact.create({
       userId: session.user.id,
       projectId: projectId || null,
@@ -183,12 +270,16 @@ export async function POST(req) {
       notes: notes || info.qrNotes || (method === 'qr' ? 'Scanned via QR code' : 'Scanned via AI'),
       cardImage: url,
       cardImagePublicId: publicId,
+      cardImages: [cardImageEntry],
+      designationRaw: info.title || '',
       scanMethod: method,
       scanCost: costUsd,
       scanRequestId: requestId || null,
+      seenAtProjects: projectId ? [projectId] : [],
+      enrichmentStatus: 'pending',
+      ...dedupe,
     });
 
-    const sizeInKb = Math.round((image.length * 0.75) / 1024);
     let media;
     try {
       media = await Media.create({
@@ -199,6 +290,10 @@ export async function POST(req) {
         fileSize: `${sizeInKb} KB`,
         fileType: 'image/jpeg',
         contactId: contact._id,
+        projectId: projectId || null,
+        side: cardSide,
+        scanMethod: method,
+        duplicateStatus: 'unique',
       });
     } catch (error) {
       await Contact.deleteOne({ _id: contact._id });

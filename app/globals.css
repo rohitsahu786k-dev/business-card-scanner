@@ -1234,3 +1234,30 @@ input,textarea,select{font-family:inherit}
   .header-title-block h1{font-size:13px!important}
   .mobile-bottom-nav{left:7px;right:7px}
 }
+
+/* ---- Auto-selected event badge (read-only scanner context) ---- */
+.event-context-badge{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.event-context-main{display:flex;align-items:center;gap:10px;min-width:0}
+.event-context-dot{flex:none;width:9px;height:9px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 4px rgba(34,197,94,.16)}
+.event-context-main>div{display:flex;flex-direction:column;min-width:0}
+.event-context-main strong{font-size:14px;font-weight:800;color:var(--text);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.event-context-main span{font-size:11.5px;color:var(--text2);font-weight:600}
+.event-context-actions{display:flex;align-items:center;gap:8px}
+.event-context-change{border:1.5px solid var(--border);background:#fff;color:var(--text2);font-size:11px;font-weight:700;border-radius:9px;padding:8px 12px;cursor:pointer}
+.event-context-change:hover{border-color:var(--red);color:var(--red)}
+.destination-picker{display:flex;gap:8px;margin-top:12px}
+.destination-picker select{flex:1;height:44px;padding:0 12px;border:1.5px solid var(--border);border-radius:11px;background:#fff;color:var(--text);font-size:13px;font-weight:600;outline:none}
+.destination-picker select:focus{border-color:var(--red);box-shadow:0 0 0 3px var(--red-glow)}
+
+/* ---- Two-sided (front + back) capture ---- */
+.two-sided-toggle{display:flex;align-items:center;gap:9px;margin:10px 0;cursor:pointer;user-select:none}
+.two-sided-toggle input{width:17px;height:17px;accent-color:var(--red);cursor:pointer}
+.two-sided-toggle span{font-size:12.5px;font-weight:700;color:var(--text)}
+.two-sided-toggle i{color:var(--red);margin-right:2px}
+.side-prompt{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;background:linear-gradient(135deg,#fff,var(--red-light));border:1.5px solid rgba(230,50,50,.28);border-radius:13px;padding:12px 14px;margin-bottom:12px}
+.side-prompt strong{display:block;font-size:13px;font-weight:800;color:var(--text)}
+.side-prompt strong i{color:#16a34a;margin-right:5px}
+.side-prompt span{font-size:11.5px;color:var(--text2);font-weight:600}
+.side-prompt .btn-outline{flex:none;white-space:nowrap}
+.capture-side-label{position:absolute;bottom:-18px;left:50%;transform:translateX(-50%);font-size:10px;font-weight:800;letter-spacing:.4px;color:var(--red);text-transform:uppercase}
+.btn-capture{position:relative}
