@@ -14,8 +14,19 @@ export async function PUT(req, { params }) {
     await dbConnect();
     const data = await req.json();
 
-    // Prevent updating immutable _id field
-    const { _id, ...updateData } = data;
+    if (!data.name?.trim()) {
+      return NextResponse.json({ error: 'Project / exhibition name is required' }, { status: 400 });
+    }
+    if (data.type && !['project', 'exhibition'].includes(data.type)) {
+      return NextResponse.json({ error: 'Invalid destination type' }, { status: 400 });
+    }
+    const updateData = {
+      name: data.name.trim(),
+      type: data.type || 'project',
+      description: data.description || '',
+      eventDate: data.eventDate || null,
+      location: data.location || '',
+    };
 
     const project = await Project.findOneAndUpdate(
       { _id: id, userId: session.user.id },
@@ -43,7 +54,7 @@ export async function DELETE(req, { params }) {
     if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
 
     // Set contacts in this project to unorganized (projectId: null)
-    await Contact.updateMany({ projectId: id }, { projectId: null });
+    await Contact.updateMany({ projectId: id, userId: session.user.id }, { projectId: null });
 
     return NextResponse.json({ message: 'Deleted' });
   } catch (error) {
