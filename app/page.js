@@ -16,6 +16,15 @@ import { analyseVideoFrame, fingerprintDistance, getCardCrop } from '@/lib/card-
 const MAX_CONCURRENT_SCANS = 2;
 const USD_TO_INR = 84;
 
+const PAGE_META = {
+  contacts: { eyebrow: 'Relationship hub', title: 'My Contacts', subtitle: 'Search, organize and manage every connection.' },
+  projects: { eyebrow: 'Event workspace', title: 'Projects & Exhibitions', subtitle: 'Keep every event and its visitors perfectly organized.' },
+  media: { eyebrow: 'Asset library', title: 'Media Gallery', subtitle: 'Review card scans and linked visual assets.' },
+  scan: { eyebrow: 'Smart capture', title: 'Scan Visitors', subtitle: 'Automatically detect cards and QR contacts.' },
+  profile: { eyebrow: 'Personal settings', title: 'My Profile', subtitle: 'Manage your identity, photo and account security.' },
+  admin: { eyebrow: 'Administration', title: 'Admin Console', subtitle: 'Manage users and platform access.' },
+};
+
 const createEmptyContact = (projectId = '') => ({
   name: '',
   title: '',
@@ -111,6 +120,29 @@ export default function Dashboard() {
   const openNewContact = () => {
     setViewContact(null);
     setEditContact(createEmptyContact(selectedProjectId));
+  };
+
+  const openContacts = (favoritesOnly = false) => {
+    stopCamera();
+    setFilterFavorite(favoritesOnly);
+    setSelectedProjectId('');
+    setActiveTab('contacts');
+    setMobileMenuOpen(false);
+  };
+
+  const openNavigationTab = (tab) => {
+    if (tab === 'scan') {
+      openScanner();
+      return;
+    }
+    stopCamera();
+    setActiveTab(tab);
+    setMobileMenuOpen(false);
+  };
+
+  const openDataTools = () => {
+    setMobileMenuOpen(false);
+    setToolsModalOpen(true);
   };
 
   // Each bottom-dock destination should open at its actionable top, even if
@@ -1191,59 +1223,90 @@ export default function Dashboard() {
       : name.slice(0, 2).toUpperCase();
   };
 
+  const currentPage = PAGE_META[activeTab] || PAGE_META.contacts;
+
   return (
     <div className="dashboard">
       {toast.message && <Toast key={toast.id} message={toast.message} type={toast.type} />}
 
       {/* Sidebar Overlay */}
-      <div className={`sidebar-overlay ${mobileMenuOpen ? 'open' : ''}`} onClick={() => setMobileMenuOpen(false)}></div>
+      <div className={`sidebar-overlay ${mobileMenuOpen ? 'open' : ''}`} onClick={() => setMobileMenuOpen(false)} aria-hidden="true"></div>
 
       {/* Sidebar */}
-      <aside className={`sidebar ${mobileMenuOpen ? 'open' : ''}`}>
+      <aside className={`sidebar ${mobileMenuOpen ? 'open' : ''}`} aria-label="Main navigation">
         <div className="sidebar-header">
-          <img src="/assets/logo-full.png" alt="OnePWS logo" />
+          <div className="sidebar-brand-lockup">
+            <img src="/assets/logo-full.png" alt="OnePWS logo" />
+            <span>CardScan Workspace</span>
+          </div>
+          <button type="button" className="sidebar-close" onClick={() => setMobileMenuOpen(false)} aria-label="Close navigation menu">
+            <span></span><span></span>
+          </button>
+        </div>
+
+        <div className="sidebar-workspace-card">
+          <span className="workspace-card-icon"><i className="fas fa-wand-magic-sparkles"></i></span>
+          <div>
+            <strong>Smart lead capture</strong>
+            <small>{contacts.length} contacts across {projects.length} workspaces</small>
+          </div>
         </div>
 
         <nav className="sidebar-nav">
-          <button className={`nav-item ${activeTab === 'contacts' ? 'active' : ''}`} onClick={() => { setActiveTab('contacts'); setMobileMenuOpen(false); }}>
+          <div className="nav-section">Workspace</div>
+          <button className={`nav-item ${activeTab === 'contacts' && !filterFavorite ? 'active' : ''}`} onClick={() => openContacts(false)}>
             <i className="fas fa-address-book"></i>
-            <span>Contacts</span>
+            <span>All Contacts</span>
             <span className="badge">{contacts.length}</span>
           </button>
-          <button className={`nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => { setActiveTab('projects'); setMobileMenuOpen(false); }}>
-            <i className="fas fa-folder"></i>
+          <button className={`nav-item ${activeTab === 'contacts' && filterFavorite ? 'active' : ''}`} onClick={() => openContacts(true)}>
+            <i className="fas fa-star"></i>
+            <span>Favorites</span>
+            <span className="badge subtle">{contacts.filter(contact => contact.favorite).length}</span>
+          </button>
+          <button className={`nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => openNavigationTab('projects')}>
+            <i className="fas fa-calendar-days"></i>
             <span>Projects / Exhibitions</span>
             <span className="badge">{projects.length}</span>
           </button>
-          <button className={`nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => { setActiveTab('media'); setMobileMenuOpen(false); }}>
-            <i className="fas fa-images"></i>
+          <button className={`nav-item nav-item-scan ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => openNavigationTab('scan')}>
+            <i className="fas fa-camera"></i>
+            <span>Smart Scanner</span>
+            <em>Auto</em>
+          </button>
+          <button className={`nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => openNavigationTab('media')}>
+            <i className="fas fa-photo-film"></i>
             <span>Media Gallery</span>
             <span className="badge">{mediaItems.length}</span>
           </button>
-          <button className={`nav-item ${activeTab === 'scan' ? 'active' : ''}`} onClick={openScanner}>
-            <i className="fas fa-qrcode"></i>
-            <span>Scan Card / QR</span>
+
+          <div className="nav-section">Data tools</div>
+          <button className="nav-item" onClick={openDataTools}>
+            <i className="fas fa-arrow-right-arrow-left"></i>
+            <span>Import / Export</span>
+          </button>
+          <button className="nav-item" onClick={() => { setMobileMenuOpen(false); handleExport('csv'); }}>
+            <i className="fas fa-file-arrow-down"></i>
+            <span>Download CSV</span>
           </button>
 
           <div className="nav-section">Account</div>
-          <button className={`nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => { setActiveTab('profile'); setMobileMenuOpen(false); }}>
-            <i className="fas fa-user-circle"></i>
+          <button className={`nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => openNavigationTab('profile')}>
+            <i className="fas fa-user-gear"></i>
             <span>My Profile</span>
           </button>
 
           {session.user.role === 'admin' && (
-            <>
-              <div className="nav-section">Admin Access</div>
-              <button className={`nav-item ${activeTab === 'admin' ? 'active' : ''}`} onClick={() => { setActiveTab('admin'); setMobileMenuOpen(false); }}>
-                <i className="fas fa-shield-halved"></i>
-                <span>User Management</span>
-              </button>
-            </>
+            <button className={`nav-item ${activeTab === 'admin' ? 'active' : ''}`} onClick={() => openNavigationTab('admin')}>
+              <i className="fas fa-shield-halved"></i>
+              <span>User Management</span>
+              <em>Admin</em>
+            </button>
           )}
         </nav>
 
         <div className="sidebar-footer">
-          <div className="user-info" onClick={() => { setActiveTab('profile'); setMobileMenuOpen(false); }}>
+          <button type="button" className="user-info" onClick={() => openNavigationTab('profile')}>
             <div className="user-avatar">
               {session.user.avatar ? <img src={session.user.avatar} alt="avatar" /> : getInitials(session.user.name)}
             </div>
@@ -1251,8 +1314,9 @@ export default function Dashboard() {
               <h4>{session.user.name}</h4>
               <p>{session.user.role === 'admin' ? 'Administrator' : 'Standard User'}</p>
             </div>
-          </div>
-          <button className="nav-item" onClick={() => signOut({ callbackUrl: '/login' })} style={{ color: 'var(--red)', marginTop: '8px' }}>
+            <i className="fas fa-chevron-right user-chevron"></i>
+          </button>
+          <button className="nav-item nav-item-logout" onClick={() => signOut({ callbackUrl: '/login' })}>
             <i className="fas fa-sign-out-alt"></i>
             <span>Sign Out</span>
           </button>
@@ -1263,20 +1327,29 @@ export default function Dashboard() {
       <main className="main-content">
         {/* Top Header */}
         <header className="top-header">
-          <div className="header-brand-mobile">
-            <img src="/assets/logo-full.png" alt="OnePWS logo" className="mobile-logo-full" />
+          <div className="header-leading">
+            <button
+              type="button"
+              className={`mobile-menu-trigger ${mobileMenuOpen ? 'open' : ''}`}
+              onClick={() => setMobileMenuOpen(true)}
+              aria-label="Open navigation menu"
+              aria-expanded={mobileMenuOpen}
+            >
+              <span className="menu-line"></span>
+              <span className="menu-line short"></span>
+              <span className="menu-line"></span>
+            </button>
+            <div className="header-brand-mobile">
+              <img src="/assets/logo-icon.png" alt="OnePWS" className="mobile-logo-icon" />
+            </div>
+            <div className="header-title-block">
+              <span>{currentPage.eyebrow}</span>
+              <h1>{currentPage.title}</h1>
+              <p>{currentPage.subtitle}</p>
+            </div>
           </div>
 
-          <h1>
-            {activeTab === 'contacts' && 'My Contacts'}
-            {activeTab === 'projects' && 'Projects & Exhibitions'}
-            {activeTab === 'media' && 'Media Gallery'}
-            {activeTab === 'scan' && 'Scan Visitors'}
-            {activeTab === 'profile' && 'My Profile'}
-            {activeTab === 'admin' && 'Admin Console'}
-          </h1>
-
-          <div className="top-header-actions">
+          <div className={`top-header-actions header-actions-${activeTab}`}>
             {activeTab === 'contacts' && (
               <>
                 <div className="header-search">
@@ -1288,13 +1361,13 @@ export default function Dashboard() {
                     onChange={(e) => setSearchQuery(e.target.value)}
                   />
                 </div>
-                <button className="icon-btn" onClick={() => setFilterFavorite(!filterFavorite)} title="Filter Favorites" style={{ borderColor: filterFavorite ? 'var(--red)' : '', color: filterFavorite ? 'var(--red)' : '' }}>
+                <button className={`icon-btn header-favorite-action ${filterFavorite ? 'active' : ''}`} onClick={() => setFilterFavorite(!filterFavorite)} title="Filter Favorites" aria-label="Filter favorite contacts">
                   <i className="fas fa-star"></i>
                 </button>
-                <button className="icon-btn" onClick={() => setToolsModalOpen(true)} title="Import / Export Data">
+                <button className="icon-btn header-secondary-action" onClick={openDataTools} title="Import / Export Data" aria-label="Open import and export tools">
                   <i className="fas fa-file-import"></i>
                 </button>
-                <button className="icon-btn" onClick={() => handleExport('csv')} title="Download all contacts as CSV" aria-label="Download all contacts as CSV">
+                <button className="icon-btn header-secondary-action" onClick={() => handleExport('csv')} title="Download all contacts as CSV" aria-label="Download all contacts as CSV">
                   <i className="fas fa-file-csv"></i>
                 </button>
                 <button className="btn-sm btn-quick-scan" onClick={openScanner}>
@@ -1315,12 +1388,19 @@ export default function Dashboard() {
                     onChange={(e) => setMediaSearchQuery(e.target.value)}
                   />
                 </div>
-                <button className="btn-sm" onClick={() => setMediaModal({ title: '', base64Data: '', contactId: '' })}>
+                <button className="btn-sm header-media-upload" onClick={() => setMediaModal({ title: '', base64Data: '', contactId: '' })}>
                   <i className="fas fa-upload"></i>
                   <span>Upload Media</span>
                 </button>
               </>
             )}
+            <button type="button" className="header-profile-button" onClick={() => openNavigationTab('profile')} aria-label="Open profile">
+              <span className="header-profile-avatar">
+                {session.user.avatar ? <img src={session.user.avatar} alt="" /> : getInitials(session.user.name)}
+              </span>
+              <span className="header-profile-copy"><strong>{session.user.name}</strong><small>{session.user.role}</small></span>
+              <i className="fas fa-chevron-down"></i>
+            </button>
           </div>
         </header>
 
@@ -2570,27 +2650,27 @@ export default function Dashboard() {
       )}
 
       {/* Mobile Bottom Navigation Bar */}
-      <nav className="mobile-bottom-nav">
-        <button className={`mobile-nav-item ${activeTab === 'contacts' ? 'active' : ''}`} onClick={() => setActiveTab('contacts')}>
+      <nav className="mobile-bottom-nav" aria-label="Quick navigation">
+        <button className={`mobile-nav-item ${activeTab === 'contacts' ? 'active' : ''}`} onClick={() => openContacts(false)} aria-label="Contacts">
           <i className="fas fa-address-book"></i>
           <span>Contacts</span>
         </button>
-        <button className={`mobile-nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => setActiveTab('projects')}>
-          <i className="fas fa-folder"></i>
+        <button className={`mobile-nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => openNavigationTab('projects')} aria-label="Projects and exhibitions">
+          <i className="fas fa-calendar-days"></i>
           <span>Events</span>
         </button>
-        <button className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''}`} onClick={openScanner} aria-label="Open automatic scanner">
+        <button className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => openNavigationTab('scan')} aria-label="Open automatic scanner">
           <div className="scan-btn-inner">
             <i className="fas fa-camera"></i>
           </div>
           <span className="scan-nav-label">Scan</span>
         </button>
-        <button className={`mobile-nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => setActiveTab('media')}>
-          <i className="fas fa-images"></i>
+        <button className={`mobile-nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => openNavigationTab('media')} aria-label="Media gallery">
+          <i className="fas fa-photo-film"></i>
           <span>Media</span>
         </button>
-        <button className={`mobile-nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => setActiveTab('profile')}>
-          <i className="fas fa-user-circle"></i>
+        <button className={`mobile-nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => openNavigationTab('profile')} aria-label="Profile">
+          <i className="fas fa-user-gear"></i>
           <span>Profile</span>
         </button>
       </nav>
