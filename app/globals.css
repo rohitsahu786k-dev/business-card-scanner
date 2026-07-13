@@ -1320,5 +1320,16 @@ input,textarea,select{font-family:inherit}
 .map-detail li b{color:var(--text);font-weight:800}
 .map-toplist li span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:70%}
 @media(max-width:520px){.india-map-svg{width:70vw;margin:0 auto}}
+
+/* ---- Media gallery enrichment chips + side badge ---- */
+.media-side-badge{position:absolute;top:10px;right:10px;z-index:2;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.4px;color:#fff;padding:3px 8px;border-radius:6px}
+.media-side-badge.front{background:#2563eb}
+.media-side-badge.back{background:#8b5cf6}
+.media-card-tags{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 2px}
+.media-tag{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;padding:3px 7px;border-radius:6px;background:#f1f5f9;color:var(--text2);max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.media-tag i{font-size:9px}
+.media-tag.industry{background:rgba(37,99,235,.1);color:#2563eb}
+.media-tag.desig{background:rgba(139,92,246,.1);color:#8b5cf6}
+.media-tag.loc{background:rgba(8,145,178,.1);color:#0891b2}
 @media(max-width:900px){.kpi-grid{grid-template-columns:repeat(2,1fr)}.chart-grid{grid-template-columns:1fr}}
 @media(max-width:420px){.kpi-value{font-size:22px}.bar-label{flex-basis:30%}}

@@ -119,6 +119,9 @@ export default function Dashboard() {
   const [showAdminUserPassword, setShowAdminUserPassword] = useState(false);
   const [mediaFilter, setMediaFilter] = useState('all');
   const [mediaSort, setMediaSort] = useState('newest');
+  const [mediaIndustry, setMediaIndustry] = useState('all');
+  const [mediaDesignation, setMediaDesignation] = useState('all');
+  const [mediaLocation, setMediaLocation] = useState('all');
   const [mediaDensity, setMediaDensity] = useState('standard');
 
   const openNewContact = () => {
@@ -1519,6 +1522,15 @@ export default function Dashboard() {
 
               {/* ============ MEDIA GALLERY TAB ============ */}
               {activeTab === 'media' && (() => {
+                // Distinct enrichment values across linked contacts, for the
+                // Industry / Designation / Location filter dropdowns.
+                const distinct = (field) => Array.from(
+                  new Set(mediaItems.map(m => (m.contactId && m.contactId[field]) || '').filter(Boolean)),
+                ).sort();
+                const industryOptions = distinct('industry');
+                const designationOptions = distinct('designationCategory');
+                const locationOptions = distinct('city');
+
                 // Calculate filtered and sorted items dynamically
                 let items = mediaItems.filter(item => item.title.toLowerCase().includes(mediaSearchQuery.toLowerCase()));
 
@@ -1527,6 +1539,9 @@ export default function Dashboard() {
                 } else if (mediaFilter === 'unlinked') {
                   items = items.filter(item => !item.contactId);
                 }
+                if (mediaIndustry !== 'all') items = items.filter(item => item.contactId?.industry === mediaIndustry);
+                if (mediaDesignation !== 'all') items = items.filter(item => item.contactId?.designationCategory === mediaDesignation);
+                if (mediaLocation !== 'all') items = items.filter(item => item.contactId?.city === mediaLocation);
 
                 items.sort((a, b) => {
                   if (mediaSort === 'newest') return new Date(b.createdAt) - new Date(a.createdAt);
@@ -1595,6 +1610,45 @@ export default function Dashboard() {
                             <option value="all">All Assets</option>
                             <option value="linked">Linked Only</option>
                             <option value="unlinked">Unlinked Only</option>
+                          </select>
+                        </div>
+
+                        {/* Industry Filter */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)' }}>Industry:</label>
+                          <select
+                            value={mediaIndustry}
+                            onChange={(e) => setMediaIndustry(e.target.value)}
+                            style={{ height: '36px', padding: '0 10px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '13px', background: '#fff', cursor: 'pointer', outline: 'none' }}
+                          >
+                            <option value="all">All Industries</option>
+                            {industryOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                          </select>
+                        </div>
+
+                        {/* Designation Filter */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)' }}>Designation:</label>
+                          <select
+                            value={mediaDesignation}
+                            onChange={(e) => setMediaDesignation(e.target.value)}
+                            style={{ height: '36px', padding: '0 10px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '13px', background: '#fff', cursor: 'pointer', outline: 'none' }}
+                          >
+                            <option value="all">All Designations</option>
+                            {designationOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                          </select>
+                        </div>
+
+                        {/* Location Filter */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)' }}>Location:</label>
+                          <select
+                            value={mediaLocation}
+                            onChange={(e) => setMediaLocation(e.target.value)}
+                            style={{ height: '36px', padding: '0 10px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '13px', background: '#fff', cursor: 'pointer', outline: 'none' }}
+                          >
+                            <option value="all">All Locations</option>
+                            {locationOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                           </select>
                         </div>
 
@@ -1698,6 +1752,9 @@ export default function Dashboard() {
                             <span className={`media-card-badge ${item.contactId ? 'linked' : ''}`}>
                               {item.contactId ? `Linked: ${item.contactId.name || 'Contact'}` : 'Unlinked'}
                             </span>
+                            {(item.side === 'front' || item.side === 'back') && (
+                              <span className={`media-side-badge ${item.side}`}>{item.side}</span>
+                            )}
                             <div className="media-card-img-container" onClick={() => setViewLightbox(item)} style={{ cursor: 'pointer' }}>
                               <img src={item.url} alt={item.title} />
                             </div>
@@ -1707,6 +1764,13 @@ export default function Dashboard() {
                                 <span>{item.fileSize || 'Unknown Size'}</span>
                                 <span>{new Date(item.createdAt).toLocaleDateString()}</span>
                               </div>
+                              {item.contactId && (item.contactId.industry || item.contactId.designationCategory || item.contactId.city) && (
+                                <div className="media-card-tags">
+                                  {item.contactId.industry && <span className="media-tag industry"><i className="fas fa-industry"></i>{item.contactId.industry}</span>}
+                                  {item.contactId.designationCategory && <span className="media-tag desig"><i className="fas fa-user-tie"></i>{item.contactId.designationCategory}</span>}
+                                  {item.contactId.city && <span className="media-tag loc"><i className="fas fa-location-dot"></i>{item.contactId.city}</span>}
+                                </div>
+                              )}
                               <div className="media-card-actions">
                                 <button className="btn-view" onClick={() => setViewLightbox(item)} title="View Larger" aria-label={`View ${item.title}`}>
                                   <i className="fas fa-search-plus"></i> View

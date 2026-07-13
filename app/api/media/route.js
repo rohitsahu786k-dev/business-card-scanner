@@ -13,7 +13,7 @@ export async function GET() {
 
   await dbConnect();
   const mediaItems = await Media.find({ userId: session.user.id })
-    .populate('contactId', 'name email company')
+    .populate('contactId', 'name email company title industry designationCategory department seniorityLevel city state country leadPriority enrichmentStatus')
     .sort({ createdAt: -1 })
     .lean();
 
