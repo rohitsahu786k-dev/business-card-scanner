@@ -1,10 +1,9 @@
 import { NextResponse } from 'next/server';
 
-export async function middleware(req) {
+export function proxy(req) {
   try {
     const { pathname } = req.nextUrl;
 
-    // Allow API auth, public assets, login/signup/forgot-password/reset-password pages
     if (
       pathname.startsWith('/api/auth') ||
       pathname.startsWith('/api/signup') ||
@@ -20,11 +19,9 @@ export async function middleware(req) {
       return NextResponse.next();
     }
 
-    // Edge-safe check for NextAuth session cookies
     const sessionToken = req.cookies.get('next-auth.session-token')?.value;
     const secureSessionToken = req.cookies.get('__Secure-next-auth.session-token')?.value;
 
-    // Redirect unauthenticated users to login if no session cookie exists
     if (!sessionToken && !secureSessionToken) {
       const url = req.nextUrl.clone();
       url.pathname = '/login';
@@ -33,8 +30,7 @@ export async function middleware(req) {
 
     return NextResponse.next();
   } catch (error) {
-    console.error('Middleware error:', error);
-    // Graceful fallback to login page to avoid 500 Edge Function crash
+    console.error('Proxy error:', error);
     const url = req.nextUrl.clone();
     url.pathname = '/login';
     return NextResponse.redirect(url);

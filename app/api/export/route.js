@@ -13,17 +13,28 @@ export async function GET(req) {
   const projectId = searchParams.get('projectId');
   const filter = { userId: session.user.id };
   if (projectId) filter.projectId = projectId;
-  const contacts = await Contact.find(filter).lean();
+  const contacts = await Contact.find(filter).populate('projectId', 'name').sort({ createdAt: -1 }).lean();
 
   if (format === 'csv') {
-    const headers = 'Name,Title,Company,Phone,Mobile,Email,Website,Address,Notes';
-    const rows = contacts.map(c =>
-      [c.name,c.title,c.company,c.phone,c.mobile,c.email,c.website,c.address,c.notes]
-        .map(v => `"${(v||'').replace(/"/g,'""')}"`)
-        .join(',')
-    );
-    return new NextResponse(headers + '\n' + rows.join('\n'), {
-      headers: { 'Content-Type': 'text/csv', 'Content-Disposition': 'attachment; filename=contacts.csv' },
+    const csvCell = (value) => {
+      let safe = String(value ?? '');
+      if (/^[=+\-@]/.test(safe)) safe = `'${safe}`;
+      return `"${safe.replace(/"/g, '""')}"`;
+    };
+    const headers = [
+      'Contact ID', 'Name', 'Job Title', 'Company', 'Phone', 'Mobile', 'Email',
+      'Website', 'Address', 'Notes', 'Project', 'Favorite', 'Scan Method',
+      'Scan Cost (USD)', 'Captured At', 'Card Image URL',
+    ];
+    const rows = contacts.map(c => [
+      c._id, c.name, c.title, c.company, c.phone, c.mobile, c.email, c.website,
+      c.address, c.notes, c.projectId?.name || '', c.favorite ? 'Yes' : 'No',
+      c.scanMethod, c.scanCost || 0, c.createdAt ? new Date(c.createdAt).toISOString() : '',
+      c.cardImage,
+    ].map(csvCell).join(','));
+    const date = new Date().toISOString().slice(0, 10);
+    return new NextResponse(`\uFEFF${headers.map(csvCell).join(',')}\r\n${rows.join('\r\n')}`, {
+      headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="contacts-${date}.csv"` },
     });
   }
   if (format === 'vcf') {

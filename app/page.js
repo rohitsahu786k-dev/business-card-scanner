@@ -11,6 +11,7 @@ import {
   isMeaningfulQrContact,
   compressImageDataUrl,
 } from '@/lib/qr';
+import { analyseVideoFrame, fingerprintDistance, getCardCrop } from '@/lib/card-detection';
 
 const MAX_CONCURRENT_SCANS = 2;
 const USD_TO_INR = 84;
@@ -49,11 +50,27 @@ export default function Dashboard() {
 
   // Camera & Scanner State
   const [cameraActive, setCameraActive] = useState(false);
-  const [scanPreview, setScanPreview] = useState(null); // base64 string
+  const [cameraStarting, setCameraStarting] = useState(false);
+  const [scanPreview, setScanPreview] = useState(null);
   const [scanning, setScanning] = useState(false);
+  const [scanFeedback, setScanFeedback] = useState({
+    phase: 'ready',
+    message: 'Place a QR code or business card inside the frame',
+  });
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
+  const cameraStreamRef = useRef(null);
+  const cameraStartRef = useRef(false);
+  const detectionRef = useRef({
+    armed: true,
+    stableCount: 0,
+    stableFingerprint: null,
+    capturedFingerprint: null,
+    removedCount: 0,
+    lastCaptureAt: 0,
+    lastQrText: '',
+  });
   const importFileInputRef = useRef(null);
   const bulkFileInputRef = useRef(null);
 
@@ -63,12 +80,11 @@ export default function Dashboard() {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [profileLoading, setProfileLoading] = useState(false);
-  const [scanMode, setScanMode] = useState('rapid'); // rapid | single | bulk
+  const [scanMode, setScanMode] = useState('rapid');
   const [bulkQueue, setBulkQueue] = useState([]); // { id, name, preview, qrFields, status, contact, costUsd, method, error }
   const [sessionStats, setSessionStats] = useState({ count: 0, qr: 0, ai: 0, costUsd: 0 });
   const [qrFlash, setQrFlash] = useState(false);
   const inFlightRef = useRef(new Set());
-  const lastQrRef = useRef({ text: '', at: 0 });
   const projectIdRef = useRef('');
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
@@ -200,16 +216,95 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (session) {
-      setProfileName(session.user.name || '');
-      setProfileEmail(session.user.email || '');
-      Promise.all([fetchContacts(), fetchProjects(), fetchUsers(), fetchMedia()]).finally(() => {
-        setLoading(false);
+      const frame = requestAnimationFrame(() => {
+        setProfileName(session.user.name || '');
+        setProfileEmail(session.user.email || '');
+        Promise.all([fetchContacts(), fetchProjects(), fetchUsers(), fetchMedia()]).finally(() => {
+          setLoading(false);
+        });
       });
+      return () => cancelAnimationFrame(frame);
     }
+    return undefined;
+    // Data functions intentionally use the current filters from this render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, searchQuery, selectedProjectId, filterFavorite, activeTab]);
 
   const showToast = (message, type = 'success') => {
-    setToast({ message, type });
+    setToast(previous => ({ message, type, id: (previous.id || 0) + 1 }));
+  };
+
+  const stopCamera = () => {
+    const stream = cameraStreamRef.current || videoRef.current?.srcObject;
+    stream?.getTracks().forEach(track => track.stop());
+    cameraStreamRef.current = null;
+    cameraStartRef.current = false;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setCameraActive(false);
+    setCameraStarting(false);
+  };
+
+  const startCamera = async () => {
+    if (cameraStartRef.current || cameraStreamRef.current?.active) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setScanFeedback({ phase: 'error', message: 'Camera is not supported in this browser. Upload card photos instead.' });
+      return;
+    }
+
+    cameraStartRef.current = true;
+    setCameraStarting(true);
+    setScanFeedback({ phase: 'ready', message: 'Starting camera automatically. Allow camera access if prompted...' });
+    let permissionTimer;
+    let permissionTimedOut = false;
+    try {
+      const mediaRequest = navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+      });
+      mediaRequest.then(stream => {
+        if (permissionTimedOut) stream.getTracks().forEach(track => track.stop());
+      }).catch(() => undefined);
+      const stream = await Promise.race([
+        mediaRequest,
+        new Promise((_, reject) => {
+          permissionTimer = setTimeout(() => {
+            permissionTimedOut = true;
+            reject(new Error('Camera permission timed out'));
+          }, 12000);
+        }),
+      ]);
+      cameraStreamRef.current = stream;
+      if (!videoRef.current) {
+        stream.getTracks().forEach(track => track.stop());
+        cameraStreamRef.current = null;
+        return;
+      }
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play().catch(() => undefined);
+      detectionRef.current = {
+        armed: true,
+        stableCount: 0,
+        stableFingerprint: null,
+        capturedFingerprint: null,
+        removedCount: 0,
+        lastCaptureAt: 0,
+        lastQrText: '',
+      };
+      setCameraActive(true);
+      setScanFeedback({ phase: 'ready', message: 'Place a QR code or business card inside the frame' });
+    } catch (err) {
+      console.error('Camera access failed:', err);
+      setScanFeedback({ phase: 'error', message: 'Camera access was blocked. Allow camera permission or upload photos.' });
+      showToast('Camera access was blocked. Please allow permission or upload photos.', 'error');
+    } finally {
+      clearTimeout(permissionTimer);
+      cameraStartRef.current = false;
+      setCameraStarting(false);
+    }
   };
 
   // ---------------- BACKGROUND SCAN QUEUE ----------------
@@ -221,17 +316,22 @@ export default function Dashboard() {
   };
 
   const enqueueScans = (items) => {
-    const stamped = items.map((it, idx) => ({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${idx}`,
-      name: it.name || `Scan ${new Date().toLocaleTimeString()}`,
-      preview: it.preview,
-      qrFields: it.qrFields || null,
-      status: 'queued', // queued | processing | success | failed
-      contact: null,
-      costUsd: null,
-      method: null,
-      error: null,
-    }));
+    const stamped = items.map((it, idx) => {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}-${idx}`;
+      return {
+        id,
+        requestId: id,
+        name: it.name || `Scan ${new Date().toLocaleTimeString()}`,
+        preview: it.preview,
+        qrFields: it.qrFields || null,
+        source: it.source || 'upload',
+        status: 'queued', // queued | processing | success | failed
+        contact: null,
+        costUsd: null,
+        method: null,
+        error: null,
+      };
+    });
     setBulkQueue(prev => [...stamped, ...prev]);
   };
 
@@ -250,7 +350,13 @@ export default function Dashboard() {
       const res = await fetch('/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image, qr: qrFields, projectId: projectIdRef.current || null, autoSave: true }),
+        body: JSON.stringify({
+          image,
+          qr: qrFields,
+          projectId: projectIdRef.current || null,
+          autoSave: true,
+          requestId: item.requestId,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Scan failed');
@@ -265,8 +371,12 @@ export default function Dashboard() {
       fetchContacts();
       fetchMedia();
       fetchProjects();
+      setScanFeedback({ phase: 'saved', message: 'Contact saved. Show the next card when ready.' });
+      showToast('Contact details extracted and saved successfully.', 'success');
     } catch (err) {
       updateQueueItem(item.id, { status: 'failed', error: err.message });
+      setScanFeedback({ phase: 'error', message: err.message || 'Could not read this card. Try again.' });
+      showToast(err.message || 'Could not read this card. Try again.', 'error');
     } finally {
       inFlightRef.current.delete(item.id);
     }
@@ -279,34 +389,46 @@ export default function Dashboard() {
     const video = videoRef.current;
     if (!video || !video.videoWidth) return null;
     const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    const crop = getCardCrop(video.videoWidth, video.videoHeight);
+    canvas.width = Math.round(crop.width);
+    canvas.height = Math.round(crop.height);
+    canvas.getContext('2d').drawImage(video, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height);
     return canvas.toDataURL('image/jpeg', 0.9);
   };
 
-  // Rapid capture: snap the frame, push to background queue, keep camera live
-  const captureRapid = () => {
+  const captureForBackground = (qrFields = null, name = '', capturedAt = null) => {
     const frame = grabVideoFrame();
     if (!frame) return;
+    const detection = detectionRef.current;
+    detection.armed = false;
+    const liveAnalysis = analyseVideoFrame(videoRef.current, document.createElement('canvas'));
+    detection.capturedFingerprint = liveAnalysis?.fingerprint || detection.stableFingerprint;
+    detection.lastCaptureAt = capturedAt ?? Number.POSITIVE_INFINITY;
     if (navigator.vibrate) navigator.vibrate(40);
     setQrFlash(true);
     setTimeout(() => setQrFlash(false), 350);
-    enqueueScans([{ preview: frame }]);
+    enqueueScans([{ preview: frame, qrFields, name, source: 'camera' }]);
+    setScanFeedback({ phase: 'captured', message: 'Photo captured. Extracting details in the background...' });
+    showToast('Photo captured. Details are being extracted in the background.', 'success');
   };
 
   // Keep a ref of the selected project for the background queue workers
   useEffect(() => { projectIdRef.current = selectedProjectId; }, [selectedProjectId]);
 
-  // Release the camera whenever the user leaves the scan tab
   useEffect(() => {
-    if (activeTab !== 'scan' && videoRef.current?.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach(t => t.stop());
-      videoRef.current.srcObject = null;
-      setCameraActive(false);
+    if (activeTab === 'scan') {
+      const frame = requestAnimationFrame(() => startCamera());
+      return () => cancelAnimationFrame(frame);
     }
+    const frame = requestAnimationFrame(() => stopCamera());
+    return () => cancelAnimationFrame(frame);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
+
+  useEffect(() => () => {
+    const stream = cameraStreamRef.current || videoRef.current?.srcObject;
+    stream?.getTracks().forEach(track => track.stop());
+  }, []);
 
   // Auto-run the scan queue with limited concurrency whenever items are waiting
   useEffect(() => {
@@ -323,6 +445,7 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bulkQueue]);
 
+  /* Legacy QR-only detector retained in history; replaced by unified detector.
   // Live QR auto-detect: while the camera runs, sample frames ~3x/sec. The
   // moment a contact QR appears it is captured and saved automatically.
   useEffect(() => {
@@ -361,6 +484,101 @@ export default function Dashboard() {
     }, 320);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraActive, activeTab]); */
+
+  // One continuous detector handles both QR codes and printed cards. Printed
+  // cards are captured only after four sharp, stable frames. The detector is
+  // re-armed after the saved card leaves the guide, preventing duplicates.
+  useEffect(() => {
+    if (!cameraActive || activeTab !== 'scan') return;
+    const qrCanvas = document.createElement('canvas');
+    const qrContext = qrCanvas.getContext('2d', { willReadFrequently: true });
+    const analysisCanvas = document.createElement('canvas');
+
+    const timer = setInterval(() => {
+      const video = videoRef.current;
+      if (!video || video.readyState < 2 || !video.videoWidth) return;
+
+      const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+      qrCanvas.width = Math.round(video.videoWidth * scale);
+      qrCanvas.height = Math.round(video.videoHeight * scale);
+      qrContext.drawImage(video, 0, 0, qrCanvas.width, qrCanvas.height);
+
+      let qrText = null;
+      try {
+        qrText = decodeQrFromImageData(qrContext.getImageData(0, 0, qrCanvas.width, qrCanvas.height));
+      } catch {
+        return;
+      }
+
+      const state = detectionRef.current;
+      const now = Date.now();
+      const analysis = analyseVideoFrame(video, analysisCanvas);
+      if (!analysis) return;
+
+      if (qrText) {
+        const parsed = parseQrText(qrText);
+        if (!isMeaningfulQrContact(parsed)) {
+          setScanFeedback({ phase: 'detecting', message: 'QR detected, but it does not contain contact information.' });
+          return;
+        }
+        if (state.armed && qrText !== state.lastQrText && now - state.lastCaptureAt > 1200) {
+          state.armed = false;
+          state.lastQrText = qrText;
+          state.capturedFingerprint = analysis.fingerprint;
+          state.lastCaptureAt = now;
+          captureForBackground(
+            { ...parsed.fields, notes: `Scanned via QR code (${parsed.kind})` },
+            parsed.fields.name || parsed.fields.company || 'QR Contact',
+            now,
+          );
+        } else {
+          setScanFeedback({ phase: 'saved', message: 'This QR is already captured. Show the next card.' });
+        }
+        return;
+      }
+
+      const distanceFromCaptured = fingerprintDistance(analysis.fingerprint, state.capturedFingerprint);
+      if (!state.armed) {
+        if (!analysis.cardLike || distanceFromCaptured > 18) state.removedCount += 1;
+        else state.removedCount = 0;
+
+        if (state.removedCount >= 3) {
+          state.armed = true;
+          state.removedCount = 0;
+          state.stableCount = 0;
+          state.stableFingerprint = null;
+          state.lastQrText = '';
+          state.lastCaptureAt = 0;
+          setScanFeedback({ phase: 'ready', message: 'Ready. Place the next QR code or business card inside the frame.' });
+        }
+        return;
+      }
+
+      if (!analysis.cardLike) {
+        state.stableCount = 0;
+        state.stableFingerprint = null;
+        setScanFeedback({ phase: 'ready', message: 'Place a QR code or business card inside the frame' });
+        return;
+      }
+
+      const stability = fingerprintDistance(analysis.fingerprint, state.stableFingerprint);
+      state.stableCount = stability < 5.5 ? state.stableCount + 1 : 1;
+      state.stableFingerprint = analysis.fingerprint;
+      setScanFeedback({ phase: 'detecting', message: `Business card detected. Hold steady${'.'.repeat(Math.min(state.stableCount, 3))}` });
+
+      if (state.stableCount >= 4 && now - state.lastCaptureAt > 1800) {
+        state.armed = false;
+        state.capturedFingerprint = analysis.fingerprint;
+        state.lastCaptureAt = now;
+        state.stableCount = 0;
+        captureForBackground(null, '', now);
+      }
+    }, 420);
+
+    return () => clearInterval(timer);
+    // Detector helpers intentionally use the latest refs/state setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraActive, activeTab]);
 
   // ---------------- AUTH CHECK ----------------
@@ -372,69 +590,34 @@ export default function Dashboard() {
     );
   }
 
-  // ---------------- CAMERA HANDLERS ----------------
-  const startCamera = async () => {
-    // Stop any existing stream before opening a new one
-    if (videoRef.current?.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach(t => t.stop());
-      videoRef.current.srcObject = null;
-    }
-    setCameraActive(true);
-    setScanPreview(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
-      });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-    } catch (err) {
-      console.error('Camera access denied:', err);
-      showToast('Camera access denied. Please upload a photo instead.', 'error');
-      setCameraActive(false);
-    }
-  };
-
-  const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject;
-      stream.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-    }
-    setCameraActive(false);
-  };
-
-  const capturePhoto = () => {
-    if (!videoRef.current) return;
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const base64 = canvas.toDataURL('image/jpeg', 0.9);
-    setScanPreview(base64);
-    stopCamera();
-  };
-
-  const handleFileSelect = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      setScanPreview(event.target.result);
-      stopCamera();
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
-  };
-
-  const triggerScanUpload = () => {
-    fileInputRef.current?.click();
-  };
-
   const triggerBulkUpload = () => {
     bulkFileInputRef.current?.click();
+  };
+
+  // Compatibility handlers for an existing in-progress single scan. New scan
+  // sessions always use the unified rapid flow below.
+  const capturePhoto = () => {
+    const frame = grabVideoFrame();
+    if (frame) setScanPreview(frame);
+  };
+
+  const triggerScanUpload = () => fileInputRef.current?.click();
+
+  const handleFileSelect = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ({ target }) => setScanPreview(target.result);
+    reader.readAsDataURL(file);
+    event.target.value = '';
+  };
+
+  const handleExtractCard = () => {
+    if (!scanPreview) return;
+    setScanning(true);
+    enqueueScans([{ preview: scanPreview, source: 'upload' }]);
+    setScanPreview(null);
+    setScanning(false);
   };
 
   const handleBulkFileSelect = (e) => {
@@ -456,6 +639,7 @@ export default function Dashboard() {
     window.open(url, '_blank');
   };
 
+  /* Removed single-shot review flow; unified scanner auto-saves instead.
   // Single scan: QR-first extract, auto-saved to DB + Media on the server,
   // then opened in the edit modal for review.
   const handleExtractCard = async () => {
@@ -496,6 +680,7 @@ export default function Dashboard() {
     }
   };
 
+  */
   const formatCost = (usd) => {
     if (!usd) return 'FREE';
     return `$${usd.toFixed(4)} (~₹${(usd * USD_TO_INR).toFixed(2)})`;
@@ -909,7 +1094,7 @@ export default function Dashboard() {
 
   return (
     <div className="dashboard">
-      {toast.message && <Toast message={toast.message} type={toast.type} onClose={() => setToast({ message: '', type: 'success' })} />}
+      {toast.message && <Toast key={toast.id} message={toast.message} type={toast.type} />}
 
       {/* Sidebar Overlay */}
       <div className={`sidebar-overlay ${mobileMenuOpen ? 'open' : ''}`} onClick={() => setMobileMenuOpen(false)}></div>
@@ -936,7 +1121,7 @@ export default function Dashboard() {
             <span>Media Gallery</span>
             <span className="badge">{mediaItems.length}</span>
           </button>
-          <button className={`nav-item ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => { setActiveTab('scan'); setMobileMenuOpen(false); setScanMode('rapid'); startCamera(); }}>
+          <button className={`nav-item ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => { setActiveTab('scan'); setMobileMenuOpen(false); setScanMode('rapid'); }}>
             <i className="fas fa-qrcode"></i>
             <span>Scan Card / QR</span>
           </button>
@@ -1010,7 +1195,10 @@ export default function Dashboard() {
                 <button className="icon-btn" onClick={() => setToolsModalOpen(true)} title="Import / Export Data">
                   <i className="fas fa-file-import"></i>
                 </button>
-                <button className="btn-sm btn-quick-scan" onClick={() => { setActiveTab('scan'); setScanMode('rapid'); startCamera(); }}>
+                <button className="icon-btn" onClick={() => handleExport('csv')} title="Download all contacts as CSV" aria-label="Download all contacts as CSV">
+                  <i className="fas fa-file-csv"></i>
+                </button>
+                <button className="btn-sm btn-quick-scan" onClick={() => { setActiveTab('scan'); setScanMode('rapid'); }}>
                   <i className="fas fa-camera"></i>
                   <span>Quick Scan</span>
                 </button>
@@ -1048,6 +1236,12 @@ export default function Dashboard() {
               {/* ============ CONTACTS TAB ============ */}
               {activeTab === 'contacts' && (
                 <div>
+                  {selectedProjectId && (
+                    <button className="context-back" onClick={() => { setSelectedProjectId(''); setActiveTab('projects'); }}>
+                      <i className="fas fa-arrow-left"></i>
+                      Back to Projects
+                    </button>
+                  )}
                   {/* Project Selector pill row */}
                   <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '16px', marginBottom: '8px' }}>
                     <button
@@ -1084,14 +1278,27 @@ export default function Dashboard() {
                       <div className="empty-icon"><i className="fas fa-id-card"></i></div>
                       <h2>No contacts found</h2>
                       <p>Try resetting filters, searching for something else, or scan a new business card.</p>
-                      <button className="btn-primary" onClick={() => { setActiveTab('scan'); setScanMode('rapid'); startCamera(); }} style={{ maxWidth: '200px', margin: '0 auto' }}>
+                      <button className="btn-primary" onClick={() => { setActiveTab('scan'); setScanMode('rapid'); }} style={{ maxWidth: '200px', margin: '0 auto' }}>
                         <i className="fas fa-camera"></i> Scan Card Now
                       </button>
                     </div>
                   ) : (
                     <div className="contact-grid">
                       {contacts.map(c => (
-                        <div key={c._id} className="contact-row" onClick={() => setViewContact(c)}>
+                        <div
+                          key={c._id}
+                          className="contact-row"
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Open contact ${c.name}`}
+                          onClick={() => setViewContact(c)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              setViewContact(c);
+                            }
+                          }}
+                        >
                           <div className="contact-avatar">{getInitials(c.name)}</div>
                           <div className="contact-details">
                             <h3>{c.name}</h3>
@@ -1099,6 +1306,9 @@ export default function Dashboard() {
                             <p className="meta">{c.title ? `${c.title} • ` : ''}{c.email || c.phone || 'No contact details'}</p>
                           </div>
                           <div className="contact-actions" onClick={e => e.stopPropagation()}>
+                            <button onClick={() => setViewContact(c)} title="Open contact details" aria-label={`Open ${c.name}`}>
+                              <i className="fas fa-chevron-right"></i>
+                            </button>
                             {c.phone && (
                               <button onClick={() => window.open(`tel:${c.phone}`)} title="Call Working Phone">
                                 <i className="fas fa-phone"></i>
@@ -1436,40 +1646,52 @@ export default function Dashboard() {
                               <span className="corner br"></span>
                               <div className="scan-line"></div>
                             </div>
+                            {(scanFeedback.phase === 'captured' || scanFeedback.phase === 'saved') && (
+                              <div className="scan-success-overlay" aria-live="polite">
+                                <span className="scan-success-check"><i className="fas fa-check"></i></span>
+                                <strong>{scanFeedback.phase === 'captured' ? 'Photo captured' : 'Contact saved'}</strong>
+                                <small>{scanFeedback.message}</small>
+                              </div>
+                            )}
                             <div className="qr-live-pill">
-                              <span className="live-dot"></span> QR auto-detect ON
+                              <span className="live-dot"></span> QR + Card auto-detect ON
                             </div>
                           </>
                         ) : (
                           <div className="camera-off-state">
-                            <i className="fas fa-camera"></i>
-                            <p>Camera is off</p>
-                            <button className="btn-primary" onClick={startCamera} style={{ width: 'auto', padding: '10px 24px' }}>
-                              <i className="fas fa-video"></i> Start Camera
-                            </button>
+                            <i className={`fas ${cameraStarting ? 'fa-spinner fa-spin' : 'fa-camera'}`}></i>
+                            <p>{cameraStarting ? 'Starting camera automatically. Allow access if prompted...' : scanFeedback.message}</p>
+                            {!cameraStarting && scanFeedback.phase === 'error' && (
+                              <button className="btn-outline" onClick={startCamera}>
+                                <i className="fas fa-rotate-right"></i> Retry camera
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>
 
-                      {cameraActive && (
-                        <div className="rapid-controls">
+                      <div className={`scan-feedback ${scanFeedback.phase}`} aria-live="polite">
+                        <i className={`fas ${scanFeedback.phase === 'saved' || scanFeedback.phase === 'captured' ? 'fa-circle-check' : scanFeedback.phase === 'error' ? 'fa-circle-exclamation' : scanFeedback.phase === 'detecting' ? 'fa-crosshairs' : 'fa-wand-magic-sparkles'}`}></i>
+                        <span>{scanFeedback.message}</span>
+                      </div>
+
+                      <div className="rapid-controls">
                           <button className="rapid-side-btn" onClick={triggerBulkUpload} title="Pick from gallery">
                             <i className="fas fa-images"></i>
                             <span>Gallery</span>
                           </button>
-                          <button className="btn-capture" onClick={captureRapid} title="Capture card">
+                          <button className="btn-capture" onClick={() => captureForBackground()} title="Capture manually" disabled={!cameraActive}>
                             <i className="fas fa-camera"></i>
                           </button>
-                          <button className="rapid-side-btn" onClick={stopCamera} title="Stop camera">
-                            <i className="fas fa-video-slash"></i>
-                            <span>Stop</span>
+                          <button className="rapid-side-btn" onClick={handleDownloadBulkCSV} title="Download all contacts as CSV">
+                            <i className="fas fa-file-csv"></i>
+                            <span>CSV</span>
                           </button>
-                        </div>
-                      )}
+                      </div>
 
                       <p className="rapid-hint">
                         <i className="fas fa-bolt"></i>
-                        Point at a <strong>QR code</strong> — it saves automatically (free). For printed cards, tap the shutter and keep going — everything processes in the background.
+                        Keep one <strong>QR code or visiting card</strong> inside the guide and hold steady. It is captured automatically, saved in the background, and the scanner stays ready for bulk scanning.
                       </p>
                     </div>
                   ) : scanMode === 'single' ? (
@@ -1754,10 +1976,10 @@ export default function Dashboard() {
         <div className="modal-overlay" onClick={() => setViewContact(null)}>
           <div className="modal-box" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <h2>Contact Details</h2>
-              <button className="close-btn" onClick={() => setViewContact(null)}>
-                <i className="fas fa-times"></i>
+              <button className="modal-back" onClick={() => setViewContact(null)}>
+                <i className="fas fa-arrow-left"></i> Back to Contacts
               </button>
+              <h2>Contact Details</h2>
             </div>
             <div className="modal-body">
               <div className="detail-header">
@@ -2144,7 +2366,7 @@ export default function Dashboard() {
           <i className="fas fa-folder"></i>
           <span>Projects</span>
         </button>
-        <button className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => { setActiveTab('scan'); setScanMode('rapid'); startCamera(); }}>
+        <button className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => { setActiveTab('scan'); setScanMode('rapid'); }} aria-label="Open automatic scanner">
           <div className="scan-btn-inner">
             <i className="fas fa-camera"></i>
           </div>
