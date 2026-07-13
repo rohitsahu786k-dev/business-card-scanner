@@ -11,7 +11,7 @@ import {
   isMeaningfulQrContact,
   compressImageDataUrl,
 } from '@/lib/qr';
-import { analyseVideoFrame, fingerprintDistance, getCardCrop } from '@/lib/card-detection';
+import { getCardCrop } from '@/lib/card-detection';
 
 const MAX_CONCURRENT_SCANS = 2;
 const USD_TO_INR = 84;
@@ -20,7 +20,7 @@ const PAGE_META = {
   contacts: { eyebrow: 'Relationship hub', title: 'My Contacts', subtitle: 'Search, organize and manage every connection.' },
   projects: { eyebrow: 'Event workspace', title: 'Projects & Exhibitions', subtitle: 'Keep every event and its visitors perfectly organized.' },
   media: { eyebrow: 'Asset library', title: 'Media Gallery', subtitle: 'Review card scans and linked visual assets.' },
-  scan: { eyebrow: 'Smart capture', title: 'Scan Visitors', subtitle: 'Automatically detect cards and QR contacts.' },
+  scan: { eyebrow: 'Camera capture', title: 'Scan Visitors', subtitle: 'Frame a card or QR code, then capture it when ready.' },
   profile: { eyebrow: 'Personal settings', title: 'My Profile', subtitle: 'Manage your identity, photo and account security.' },
   admin: { eyebrow: 'Administration', title: 'Admin Console', subtitle: 'Manage users and platform access.' },
 };
@@ -78,22 +78,15 @@ export default function Dashboard() {
   const [scanning, setScanning] = useState(false);
   const [scanFeedback, setScanFeedback] = useState({
     phase: 'ready',
-    message: 'Place a QR code or business card inside the frame',
+    message: 'Frame a QR code or business card, then tap Capture.',
   });
+  const [captureNotice, setCaptureNotice] = useState(false);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
   const cameraStreamRef = useRef(null);
   const cameraStartRef = useRef(false);
-  const detectionRef = useRef({
-    armed: true,
-    stableCount: 0,
-    stableFingerprint: null,
-    capturedFingerprint: null,
-    removedCount: 0,
-    lastCaptureAt: 0,
-    lastQrText: '',
-  });
+  const captureLockRef = useRef(false);
   const importFileInputRef = useRef(null);
   const bulkFileInputRef = useRef(null);
   const pageContentRef = useRef(null);
@@ -329,7 +322,7 @@ export default function Dashboard() {
     // element, causing a first-open deadlock on mobile.
     setCameraActive(true);
     setCameraStarting(true);
-    setScanFeedback({ phase: 'ready', message: 'Starting camera automatically. Allow camera access if prompted...' });
+    setScanFeedback({ phase: 'ready', message: 'Starting camera. Allow camera access if prompted...' });
     let permissionTimer;
     let permissionTimedOut = false;
     try {
@@ -355,8 +348,8 @@ export default function Dashboard() {
       ]);
       cameraStreamRef.current = stream;
       let video = videoRef.current;
-      for (let attempt = 0; !video && attempt < 4; attempt += 1) {
-        await new Promise(resolve => requestAnimationFrame(resolve));
+      for (let attempt = 0; !video && attempt < 20; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 50));
         video = videoRef.current;
       }
       if (!video) {
@@ -364,20 +357,11 @@ export default function Dashboard() {
       }
       video.srcObject = stream;
       await video.play().catch(() => undefined);
-      detectionRef.current = {
-        armed: true,
-        stableCount: 0,
-        stableFingerprint: null,
-        capturedFingerprint: null,
-        removedCount: 0,
-        lastCaptureAt: 0,
-        lastQrText: '',
-      };
       setCameraActive(true);
       setScanFeedback({
         phase: 'ready',
         message: projectIdRef.current
-          ? 'Place a QR code or business card inside the frame'
+          ? 'Camera ready. Frame the card, then tap Capture.'
           : 'Camera ready. Select a project or exhibition to start saving contacts.',
       });
     } catch (err) {
@@ -410,12 +394,6 @@ export default function Dashboard() {
   // locally: each item is uploaded to Cloudinary and saved as Contact + Media.
   const updateQueueItem = (id, patch) => {
     setBulkQueue(prev => prev.map(i => (i.id === id ? { ...i, ...patch } : i)));
-  };
-
-  // The live detector fires several times per second; keeping the previous
-  // state object when nothing changed lets React skip re-rendering the page.
-  const setScanFeedbackIfChanged = (phase, message) => {
-    setScanFeedback(prev => (prev.phase === phase && prev.message === message ? prev : { phase, message }));
   };
 
   const enqueueScans = (items) => {
@@ -502,23 +480,26 @@ export default function Dashboard() {
     return canvas.toDataURL('image/jpeg', 0.85);
   };
 
-  const captureForBackground = (qrFields = null, name = '', capturedAt = null) => {
+  const captureForBackground = () => {
+    if (captureLockRef.current) return;
     if (!projectIdRef.current) {
       setScanFeedback({ phase: 'error', message: 'Select a project or exhibition before scanning.' });
       showToast('Select a project or exhibition before scanning.', 'error');
       return;
     }
     const frame = grabVideoFrame();
-    if (!frame) return;
-    const detection = detectionRef.current;
-    detection.armed = false;
-    const liveAnalysis = analyseVideoFrame(videoRef.current, document.createElement('canvas'));
-    detection.capturedFingerprint = liveAnalysis?.fingerprint || detection.stableFingerprint;
-    detection.lastCaptureAt = capturedAt ?? Number.POSITIVE_INFINITY;
+    if (!frame) {
+      setScanFeedback({ phase: 'error', message: 'Camera is not ready yet. Wait a moment and try again.' });
+      return;
+    }
+    captureLockRef.current = true;
+    setTimeout(() => { captureLockRef.current = false; }, 700);
     if (navigator.vibrate) navigator.vibrate(40);
     setQrFlash(true);
     setTimeout(() => setQrFlash(false), 350);
-    enqueueScans([{ preview: frame, qrFields, name, source: 'camera' }]);
+    setCaptureNotice(true);
+    setTimeout(() => setCaptureNotice(false), 900);
+    enqueueScans([{ preview: frame, source: 'camera' }]);
     setScanFeedback({ phase: 'captured', message: 'Photo captured. Extracting details in the background...' });
     showToast('Photo captured. Details are being extracted in the background.', 'success');
   };
@@ -556,148 +537,9 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bulkQueue]);
 
-  /* Legacy QR-only detector retained in history; replaced by unified detector.
-  // Live QR auto-detect: while the camera runs, sample frames ~3x/sec. The
-  // moment a contact QR appears it is captured and saved automatically.
-  useEffect(() => {
-    if (!cameraActive || activeTab !== 'scan') return;
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    const timer = setInterval(() => {
-      const video = videoRef.current;
-      if (!video || video.readyState < 2 || !video.videoWidth) return;
-      const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
-      canvas.width = Math.round(video.videoWidth * scale);
-      canvas.height = Math.round(video.videoHeight * scale);
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      let text = null;
-      try {
-        text = decodeQrFromImageData(ctx.getImageData(0, 0, canvas.width, canvas.height));
-      } catch { return; }
-      if (!text) return;
-
-      const now = Date.now();
-      if (text === lastQrRef.current.text && now - lastQrRef.current.at < 5000) return; // same QR debounce
-      lastQrRef.current = { text, at: now };
-
-      const parsed = parseQrText(text);
-      if (!isMeaningfulQrContact(parsed)) {
-        showToast('QR detected, but it has no contact info', 'error');
-        return;
-      }
-      const frame = grabVideoFrame();
-      if (!frame) return;
-      if (navigator.vibrate) navigator.vibrate([60, 40, 60]);
-      setQrFlash(true);
-      setTimeout(() => setQrFlash(false), 350);
-      enqueueScans([{ preview: frame, qrFields: { ...parsed.fields, notes: `Scanned via QR code (${parsed.kind})` }, name: parsed.fields.name || 'QR Contact' }]);
-      showToast(`QR captured: ${parsed.fields.name || parsed.fields.company || 'contact'} — saving...`, 'success');
-    }, 320);
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameraActive, activeTab]); */
-
-  // One continuous detector handles both QR codes and printed cards. Printed
-  // cards are captured only after four sharp, stable frames. The detector is
-  // re-armed after the saved card leaves the guide, preventing duplicates.
-  useEffect(() => {
-    if (!cameraActive || activeTab !== 'scan') return;
-    const qrCanvas = document.createElement('canvas');
-    const qrContext = qrCanvas.getContext('2d', { willReadFrequently: true });
-    const analysisCanvas = document.createElement('canvas');
-
-    const timer = setInterval(() => {
-      const video = videoRef.current;
-      if (!video || video.readyState < 2 || !video.videoWidth) return;
-
-      const scale = Math.min(1, 480 / Math.max(video.videoWidth, video.videoHeight));
-      qrCanvas.width = Math.round(video.videoWidth * scale);
-      qrCanvas.height = Math.round(video.videoHeight * scale);
-      qrContext.drawImage(video, 0, 0, qrCanvas.width, qrCanvas.height);
-
-      let qrText = null;
-      try {
-        qrText = decodeQrFromImageData(qrContext.getImageData(0, 0, qrCanvas.width, qrCanvas.height), 'dontInvert');
-      } catch {
-        return;
-      }
-
-      const state = detectionRef.current;
-      const now = Date.now();
-      const analysis = analyseVideoFrame(video, analysisCanvas);
-      if (!analysis) return;
-
-      if (!projectIdRef.current) {
-        state.stableCount = 0;
-        state.stableFingerprint = null;
-        setScanFeedbackIfChanged('ready', 'Select a project or exhibition to start saving contacts.');
-        return;
-      }
-
-      if (qrText) {
-        const parsed = parseQrText(qrText);
-        if (!isMeaningfulQrContact(parsed)) {
-          setScanFeedbackIfChanged('detecting', 'QR detected, but it does not contain contact information.');
-          return;
-        }
-        if (state.armed && qrText !== state.lastQrText && now - state.lastCaptureAt > 1200) {
-          state.armed = false;
-          state.lastQrText = qrText;
-          state.capturedFingerprint = analysis.fingerprint;
-          state.lastCaptureAt = now;
-          captureForBackground(
-            { ...parsed.fields, notes: `Scanned via QR code (${parsed.kind})` },
-            parsed.fields.name || parsed.fields.company || 'QR Contact',
-            now,
-          );
-        } else {
-          setScanFeedbackIfChanged('saved', 'This QR is already captured. Show the next card.');
-        }
-        return;
-      }
-
-      const distanceFromCaptured = fingerprintDistance(analysis.fingerprint, state.capturedFingerprint);
-      if (!state.armed) {
-        if (!analysis.cardLike || distanceFromCaptured > 18) state.removedCount += 1;
-        else state.removedCount = 0;
-
-        if (state.removedCount >= 3) {
-          state.armed = true;
-          state.removedCount = 0;
-          state.stableCount = 0;
-          state.stableFingerprint = null;
-          state.lastQrText = '';
-          state.lastCaptureAt = 0;
-          setScanFeedbackIfChanged('ready', 'Ready. Place the next QR code or business card inside the frame.');
-        }
-        return;
-      }
-
-      if (!analysis.cardLike) {
-        state.stableCount = 0;
-        state.stableFingerprint = null;
-        setScanFeedbackIfChanged('ready', 'Place a QR code or business card inside the frame');
-        return;
-      }
-
-      const stability = fingerprintDistance(analysis.fingerprint, state.stableFingerprint);
-      state.stableCount = stability < 5.5 ? state.stableCount + 1 : 1;
-      state.stableFingerprint = analysis.fingerprint;
-      setScanFeedbackIfChanged('detecting', `Business card detected. Hold steady${'.'.repeat(Math.min(state.stableCount, 3))}`);
-
-      if (state.stableCount >= 4 && now - state.lastCaptureAt > 1800) {
-        state.armed = false;
-        state.capturedFingerprint = analysis.fingerprint;
-        state.lastCaptureAt = now;
-        state.stableCount = 0;
-        captureForBackground(null, '', now);
-      }
-    }, 420);
-
-    return () => clearInterval(timer);
-    // Detector helpers intentionally use the latest refs/state setters.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameraActive, activeTab]);
+  // Captures now happen only from an explicit shutter-button press. The image
+  // still enters the background queue so QR decoding and detail extraction do
+  // not block the camera UI.
 
   // ---------------- AUTH CHECK ----------------
   if (!session) {
@@ -1271,8 +1113,8 @@ export default function Dashboard() {
           </button>
           <button className={`nav-item nav-item-scan ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => openNavigationTab('scan')}>
             <i className="fas fa-camera"></i>
-            <span>Smart Scanner</span>
-            <em>Auto</em>
+            <span>Camera Scanner</span>
+            <em>Manual</em>
           </button>
           <button className={`nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => openNavigationTab('media')}>
             <i className="fas fa-photo-film"></i>
@@ -1790,15 +1632,15 @@ export default function Dashboard() {
 
               {/* ============ SCAN TAB ============ */}
               {activeTab === 'scan' && (
-                <div style={{ maxWidth: '600px', margin: '0 auto' }}>
-                  {/* Mode Switcher: Rapid (camera + live QR) | Single | Bulk */}
+                <div className={`scan-page mode-${scanMode}`}>
+                  {/* Camera, single-image and bulk workflows */}
                   <div className="scan-mode-chips">
                     <button
                       type="button"
                       className={scanMode === 'rapid' ? 'active' : ''}
                       onClick={() => { setScanMode('rapid'); setScanPreview(null); startCamera(); }}
                     >
-                      <i className="fas fa-bolt"></i> Rapid Scan
+                      <i className="fas fa-camera"></i> Camera
                     </button>
                     <button
                       type="button"
@@ -1837,7 +1679,7 @@ export default function Dashboard() {
                       value={selectedProjectId}
                       onChange={(event) => {
                         setSelectedProjectId(event.target.value);
-                        if (event.target.value) setScanFeedback({ phase: 'ready', message: 'Destination selected. Place a QR code or visiting card inside the frame.' });
+                        if (event.target.value) setScanFeedback({ phase: 'ready', message: 'Destination selected. Frame the card, then tap Capture.' });
                       }}
                     >
                       <option value="">Choose a project / exhibition...</option>
@@ -1889,30 +1731,21 @@ export default function Dashboard() {
                               <span className="corner br"></span>
                               <div className="scan-line"></div>
                             </div>
-                            {(scanFeedback.phase === 'captured' || scanFeedback.phase === 'saved') && (
+                            {captureNotice && (
                               <div className="scan-success-overlay" aria-live="polite">
                                 <span className="scan-success-check"><i className="fas fa-check"></i></span>
-                                <strong>{scanFeedback.phase === 'captured' ? 'Photo captured' : 'Contact saved'}</strong>
-                                <small>{scanFeedback.message}</small>
+                                <strong>Photo captured</strong>
+                                <small>Details are being extracted in the background.</small>
                               </div>
                             )}
                             <div className="qr-live-pill">
-                              <span className="live-dot"></span> QR + Card auto-detect ON
+                              <i className="fas fa-hand-pointer"></i> Manual capture · QR + Card
                             </div>
-                            <button
-                              type="button"
-                              className="preview-capture-btn"
-                              onClick={() => captureForBackground()}
-                              aria-label="Capture card now"
-                            >
-                              <i className="fas fa-camera"></i>
-                              <span>Capture</span>
-                            </button>
                           </>
                         ) : (
                           <div className="camera-off-state">
                             <i className={`fas ${cameraStarting ? 'fa-spinner fa-spin' : 'fa-camera'}`}></i>
-                            <p>{cameraStarting ? 'Starting camera automatically. Allow access if prompted...' : scanFeedback.message}</p>
+                            <p>{cameraStarting ? 'Starting camera. Allow access if prompted...' : scanFeedback.message}</p>
                             {!cameraStarting && scanFeedback.phase === 'error' && (
                               <button className="btn-outline" onClick={startCamera}>
                                 <i className="fas fa-rotate-right"></i> Retry camera
@@ -1932,7 +1765,7 @@ export default function Dashboard() {
                             <i className="fas fa-images"></i>
                             <span>Gallery</span>
                           </button>
-                          <button className="btn-capture" onClick={() => captureForBackground()} title="Capture manually" disabled={!cameraActive}>
+                          <button className="btn-capture" onClick={() => captureForBackground()} title="Capture card" aria-label="Capture card" disabled={!cameraActive}>
                             <i className="fas fa-camera"></i>
                           </button>
                           <button className="rapid-side-btn" onClick={handleDownloadBulkCSV} title="Download all contacts as CSV">
@@ -1942,8 +1775,8 @@ export default function Dashboard() {
                       </div>
 
                       <p className="rapid-hint">
-                        <i className="fas fa-bolt"></i>
-                        Keep one <strong>QR code or visiting card</strong> inside the guide and hold steady. It is captured automatically, saved in the background, and the scanner stays ready for bulk scanning.
+                        <i className="fas fa-hand-pointer"></i>
+                        Place one <strong>QR code or visiting card</strong> inside the guide and tap the Capture camera button in the bottom dock. The photo is queued and its details are extracted in the background.
                       </p>
                     </div>
                   ) : scanMode === 'single' ? (
@@ -2659,11 +2492,15 @@ export default function Dashboard() {
           <i className="fas fa-calendar-days"></i>
           <span>Events</span>
         </button>
-        <button className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => openNavigationTab('scan')} aria-label="Open automatic scanner">
+        <button
+          className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''} ${activeTab === 'scan' && cameraActive && !cameraStarting ? 'capture-ready' : ''}`}
+          onClick={() => (activeTab === 'scan' && cameraActive && !cameraStarting ? captureForBackground() : openNavigationTab('scan'))}
+          aria-label={activeTab === 'scan' && cameraActive && !cameraStarting ? 'Capture card' : 'Open card scanner'}
+        >
           <div className="scan-btn-inner">
             <i className="fas fa-camera"></i>
           </div>
-          <span className="scan-nav-label">Scan</span>
+          <span className="scan-nav-label">{activeTab === 'scan' && cameraActive && !cameraStarting ? 'Capture' : 'Scan'}</span>
         </button>
         <button className={`mobile-nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => openNavigationTab('media')} aria-label="Media gallery">
           <i className="fas fa-photo-film"></i>
