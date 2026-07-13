@@ -5,6 +5,7 @@ import { authOptions } from '@/app/api/auth/[...nextauth]/route';
 import dbConnect from '@/lib/mongodb';
 import Contact from '@/models/Contact';
 import Project from '@/models/Project';
+import { resolveCoordinates } from '@/lib/geo';
 
 export const dynamic = 'force-dynamic';
 
@@ -115,6 +116,19 @@ export async function GET(req) {
             { $sort: { count: -1 } },
             { $limit: 8 },
           ],
+          mapPoints: [
+            { $match: { $or: [{ city: { $nin: ['', null] } }, { state: { $nin: ['', null] } }] } },
+            {
+              $group: {
+                _id: { city: '$city', state: '$state', country: '$country' },
+                count: { $sum: 1 },
+                companies: { $addToSet: '$company' },
+                decisionMakers: { $sum: { $cond: [{ $in: ['$seniorityLevel', SENIOR_LEVELS] }, 1, 0] } },
+              },
+            },
+            { $sort: { count: -1 } },
+            { $limit: 60 },
+          ],
           timeline: [
             { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } }, count: { $sum: 1 } } },
             { $sort: { _id: 1 } },
@@ -150,6 +164,29 @@ export async function GET(req) {
         : 0,
     };
 
+    // Resolve each city/state grouping to coordinates (offline). Merge points
+    // that collapse onto the same coordinate (e.g. unknown city → state centroid).
+    const mapMerge = new Map();
+    for (const p of facet.mapPoints) {
+      const coords = resolveCoordinates(p._id.city, p._id.state, p._id.country);
+      if (!coords) continue;
+      const key = `${coords.lat.toFixed(2)},${coords.lng.toFixed(2)}`;
+      const label = coords.level === 'city' && p._id.city ? p._id.city : (p._id.state || p._id.city || 'India');
+      const existing = mapMerge.get(key);
+      if (existing) {
+        existing.count += p.count;
+        existing.decisionMakers += p.decisionMakers;
+        p.companies.forEach(c => { if (c) existing.companySet.add(c.toLowerCase()); });
+      } else {
+        const companySet = new Set();
+        p.companies.forEach(c => { if (c) companySet.add(c.toLowerCase()); });
+        mapMerge.set(key, { label, lat: coords.lat, lng: coords.lng, level: coords.level, count: p.count, decisionMakers: p.decisionMakers, companySet });
+      }
+    }
+    const mapData = Array.from(mapMerge.values())
+      .map(({ companySet, ...rest }) => ({ ...rest, companies: companySet.size }))
+      .sort((a, b) => b.count - a.count);
+
     const dataQuality = {
       missingEmail: total - (t.withEmail || 0),
       missingMobile: total - (t.withMobile || 0),
@@ -174,6 +211,7 @@ export async function GET(req) {
       designations: facet.designations.map(d => ({ label: d._id, value: d.count })),
       states: facet.states.map(s => ({ label: s._id, value: s.count })),
       cities: facet.cities.map(c => ({ label: c._id, value: c.count })),
+      map: mapData,
       timeline: facet.timeline.map(d => ({ date: d._id, value: d.count })),
       enrichmentReady: kpis.industriesCovered > 0 || kpis.decisionMakers > 0,
       generatedAt: new Date().toISOString(),

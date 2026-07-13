@@ -1,8 +1,69 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
+import { INDIA_BBOX, INDIA_BORDER } from '@/lib/geo';
 
 // Brand-led categorical palette (OnePWS red first), used for donut/bar series.
 const PALETTE = ['#e63232', '#2563eb', '#16a34a', '#f59e0b', '#8b5cf6', '#0891b2', '#db2777', '#65a30d'];
+
+const MAP_W = 440;
+const MAP_H = 500;
+const projX = (lng) => ((lng - INDIA_BBOX.lngMin) / (INDIA_BBOX.lngMax - INDIA_BBOX.lngMin)) * MAP_W;
+const projY = (lat) => ((INDIA_BBOX.latMax - lat) / (INDIA_BBOX.latMax - INDIA_BBOX.latMin)) * MAP_H;
+
+function IndiaMap({ points }) {
+  const [active, setActive] = useState(null);
+  if (!points.length) {
+    return <p className="chart-empty">No mapped locations yet. Run AI enrichment so contacts get a city and appear here.</p>;
+  }
+  const max = Math.max(...points.map(p => p.count), 1);
+  const border = INDIA_BORDER
+    .map(([lat, lng], i) => `${i ? 'L' : 'M'}${projX(lng).toFixed(1)} ${projY(lat).toFixed(1)}`)
+    .join(' ') + ' Z';
+  return (
+    <div className="india-map">
+      <svg viewBox={`0 0 ${MAP_W} ${MAP_H}`} className="india-map-svg" role="img" aria-label="India contact distribution map" onMouseLeave={() => setActive(null)}>
+        <path d={border} className="india-outline" />
+        {points.map((p) => {
+          const r = 6 + Math.sqrt(p.count / max) * 22;
+          return (
+            <circle
+              key={`${p.label}-${p.lat}-${p.lng}`}
+              cx={projX(p.lng)}
+              cy={projY(p.lat)}
+              r={r}
+              className={`map-bubble ${active && active.label === p.label ? 'active' : ''}`}
+              onMouseEnter={() => setActive(p)}
+            >
+              <title>{`${p.label}: ${p.count} contacts`}</title>
+            </circle>
+          );
+        })}
+      </svg>
+      <div className="map-detail">
+        {active ? (
+          <>
+            <strong>{active.label}</strong>
+            <ul>
+              <li><span>Contacts</span><b>{active.count}</b></li>
+              <li><span>Companies</span><b>{active.companies}</b></li>
+              <li><span>Decision makers</span><b>{active.decisionMakers}</b></li>
+            </ul>
+          </>
+        ) : (
+          <>
+            <strong>{points.length} location{points.length === 1 ? '' : 's'}</strong>
+            <span className="map-hint">Hover a bubble for city details.</span>
+            <ul className="map-toplist">
+              {points.slice(0, 6).map((p) => (
+                <li key={p.label}><span>{p.label}</span><b>{p.count}</b></li>
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function Donut({ data }) {
   const total = data.reduce((sum, d) => sum + d.value, 0);
@@ -206,6 +267,11 @@ export default function AnalyticsDashboard({ projectId, projectName }) {
             <div className="chart-card wide">
               <h3>Contact Capture Timeline</h3>
               <Timeline data={data.timeline} />
+            </div>
+
+            <div className="chart-card wide">
+              <h3>Location — India Map</h3>
+              <IndiaMap points={data.map || []} />
             </div>
 
             <div className="chart-card">
