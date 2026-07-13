@@ -1261,3 +1261,46 @@ input,textarea,select{font-family:inherit}
 .side-prompt .btn-outline{flex:none;white-space:nowrap}
 .capture-side-label{position:absolute;bottom:-18px;left:50%;transform:translateX(-50%);font-size:10px;font-weight:800;letter-spacing:.4px;color:var(--red);text-transform:uppercase}
 .btn-capture{position:relative}
+
+/* ---- Analytics dashboard ---- */
+.dashboard-page{display:flex;flex-direction:column;gap:18px}
+.dashboard-head h2{font-size:20px;font-weight:800;color:var(--text)}
+.dashboard-head span{font-size:12px;color:var(--text2);font-weight:600}
+.insight-panel{display:flex;gap:11px;align-items:flex-start;background:linear-gradient(135deg,#fff,var(--red-light));border:1.5px solid rgba(230,50,50,.22);border-radius:14px;padding:14px 16px}
+.insight-panel i{color:var(--red);font-size:16px;margin-top:2px}
+.insight-panel p{font-size:13.5px;font-weight:600;color:var(--text);line-height:1.5}
+.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.kpi-card{background:#fff;border:1.5px solid var(--border);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:3px;box-shadow:var(--shadow-sm);min-height:78px}
+.kpi-label{font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.3px}
+.kpi-value{font-size:26px;font-weight:800;color:var(--text);line-height:1.1}
+.kpi-sub{font-size:11px;font-weight:600;color:var(--text2)}
+.chart-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.chart-card{background:#fff;border:1.5px solid var(--border);border-radius:16px;padding:16px 18px;box-shadow:var(--shadow-sm)}
+.chart-card.wide{grid-column:1 / -1}
+.chart-card h3{font-size:13px;font-weight:800;color:var(--text);margin-bottom:14px}
+.chart-empty{font-size:12.5px;color:var(--text2);font-weight:600;padding:14px 0}
+.skeleton{position:relative;overflow:hidden;background:#eef1f6;border-color:transparent}
+.skeleton::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.6),transparent);animation:shimmer 1.3s infinite}
+@keyframes shimmer{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+.donut-wrap{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+.donut-svg{width:130px;height:130px;flex:none}
+.donut-total{font-size:26px;font-weight:800;fill:var(--text)}
+.donut-sub{font-size:10px;font-weight:700;fill:var(--text2);text-transform:uppercase}
+.donut-legend{list-style:none;display:flex;flex-direction:column;gap:7px;font-size:12.5px;font-weight:600;color:var(--text)}
+.donut-legend li{display:flex;align-items:center;gap:8px}
+.donut-legend strong{margin-left:auto;padding-left:14px;font-weight:800}
+.legend-dot{width:10px;height:10px;border-radius:3px;flex:none}
+.bar-list{list-style:none;display:flex;flex-direction:column;gap:10px}
+.bar-list li{display:flex;align-items:center;gap:10px}
+.bar-label{flex:0 0 34%;font-size:12px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar-track{flex:1;height:9px;background:#eef1f6;border-radius:6px;overflow:hidden}
+.bar-fill{display:block;height:100%;border-radius:6px;min-width:3px}
+.bar-value{flex:none;font-size:12px;font-weight:800;color:var(--text2);min-width:26px;text-align:right}
+.timeline-chart{display:flex;align-items:flex-end;gap:5px;height:150px;padding-top:6px}
+.timeline-col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:6px;height:100%}
+.timeline-bar{width:100%;max-width:34px;background:linear-gradient(180deg,var(--red),#f97066);border-radius:5px 5px 0 0;transition:height .3s}
+.timeline-col small{font-size:9px;font-weight:700;color:var(--text2)}
+.enrich-note{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--text2);background:#f8fafc;border:1px dashed var(--border);border-radius:11px;padding:11px 14px}
+.enrich-note i{color:#2563eb}
+@media(max-width:900px){.kpi-grid{grid-template-columns:repeat(2,1fr)}.chart-grid{grid-template-columns:1fr}}
+@media(max-width:420px){.kpi-value{font-size:22px}.bar-label{flex-basis:30%}}

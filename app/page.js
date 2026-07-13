@@ -4,6 +4,7 @@ import { useSession, signOut } from 'next-auth/react';
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Toast from '@/components/Toast';
+import AnalyticsDashboard from '@/components/AnalyticsDashboard';
 import {
   decodeQrFromImageData,
   decodeQrFromDataUrl,
@@ -17,6 +18,7 @@ const MAX_CONCURRENT_SCANS = 2;
 const USD_TO_INR = 84;
 
 const PAGE_META = {
+  dashboard: { eyebrow: 'Analytics', title: 'Dashboard', subtitle: 'Live insights across every scanned visitor.' },
   contacts: { eyebrow: 'Relationship hub', title: 'My Contacts', subtitle: 'Search, organize and manage every connection.' },
   projects: { eyebrow: 'Event workspace', title: 'Projects & Exhibitions', subtitle: 'Keep every event and its visitors perfectly organized.' },
   media: { eyebrow: 'Asset library', title: 'Media Gallery', subtitle: 'Review card scans and linked visual assets.' },
@@ -1221,6 +1223,10 @@ export default function Dashboard() {
 
         <nav className="sidebar-nav">
           <div className="nav-section">Workspace</div>
+          <button className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`} onClick={() => openNavigationTab('dashboard')}>
+            <i className="fas fa-chart-line"></i>
+            <span>Dashboard</span>
+          </button>
           <button className={`nav-item ${activeTab === 'contacts' && !filterFavorite ? 'active' : ''}`} onClick={() => openContacts(false)}>
             <i className="fas fa-address-book"></i>
             <span>All Contacts</span>
@@ -1379,6 +1385,11 @@ export default function Dashboard() {
             </div>
           ) : (
             <>
+              {/* ============ DASHBOARD TAB ============ */}
+              {activeTab === 'dashboard' && (
+                <AnalyticsDashboard key={selectedProjectId} projectId={selectedProjectId} projectName={selectedDestination?.name} />
+              )}
+
               {/* ============ CONTACTS TAB ============ */}
               {activeTab === 'contacts' && (
                 <div>
