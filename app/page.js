@@ -427,6 +427,18 @@ export default function Dashboard() {
     setBulkQueue(prev => [...stamped, ...prev]);
   };
 
+  // Fire-and-forget AI enrichment for a freshly saved contact. Runs in the
+  // background so scanning is never blocked; failures are silent (retryable
+  // later via the dashboard's batch enrichment).
+  const triggerEnrich = (contactId) => {
+    if (!contactId) return;
+    fetch('/api/enrich', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contactId }),
+    }).catch(() => undefined);
+  };
+
   const runScanItem = async (item) => {
     updateQueueItem(item.id, { status: 'processing' });
     try {
@@ -454,6 +466,7 @@ export default function Dashboard() {
       if (!res.ok) throw new Error(data.error || 'Scan failed');
 
       updateQueueItem(item.id, { status: 'success', contact: data.contact, costUsd: data.costUsd, method: data.method });
+      if (!data.duplicate) triggerEnrich(data.contact?._id);
       setSessionStats(prev => ({
         count: prev.count + 1,
         qr: prev.qr + (data.method === 'qr' ? 1 : 0),
@@ -566,6 +579,7 @@ export default function Dashboard() {
 
       if (side === 'front') {
         setPendingCard({ contactId: data.contact._id, name: data.contact.name });
+        if (!data.duplicate) triggerEnrich(data.contact?._id);
         setScanFeedback({ phase: 'saved', message: 'Front captured successfully. Flip the card and capture the back — or Save Front Only.' });
         showToast(data.duplicate ? 'This contact already exists. No duplicate was created.' : 'Front captured successfully.', 'success');
       } else {

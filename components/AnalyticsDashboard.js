@@ -97,6 +97,8 @@ export default function AnalyticsDashboard({ projectId, projectName }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [enriching, setEnriching] = useState(false);
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,7 +108,30 @@ export default function AnalyticsDashboard({ projectId, projectName }) {
       .then(json => { if (!cancelled) { setData(json); setLoading(false); } })
       .catch(() => { if (!cancelled) { setError('Could not load analytics. Please refresh.'); setLoading(false); } });
     return () => { cancelled = true; };
-  }, [projectId]);
+  }, [projectId, tick]);
+
+  // Backfill enrichment for contacts scanned before enrichment ran. Loops the
+  // batch endpoint (20/call) until the queue drains, then reloads analytics.
+  const runEnrichment = async () => {
+    setEnriching(true);
+    try {
+      for (let i = 0; i < 15; i += 1) {
+        const res = await fetch('/api/enrich', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ batch: true }),
+        });
+        if (!res.ok) break;
+        const r = await res.json();
+        if (!r.processed || r.remaining === 0) break;
+      }
+    } catch {
+      // ignore — partial progress still persists; user can re-run.
+    } finally {
+      setEnriching(false);
+      setTick(t => t + 1);
+    }
+  };
 
   const insight = useMemo(() => {
     if (!data) return '';
@@ -145,6 +170,12 @@ export default function AnalyticsDashboard({ projectId, projectName }) {
           <h2>Analytics</h2>
           <span>{projectName || 'All contacts'} · updated {new Date(data.generatedAt).toLocaleTimeString()}</span>
         </div>
+        {k.pendingEnrichment > 0 && (
+          <button type="button" className="enrich-btn" onClick={runEnrichment} disabled={enriching}>
+            <i className={`fas ${enriching ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'}`}></i>
+            {enriching ? 'Enriching…' : `Run AI enrichment (${k.pendingEnrichment})`}
+          </button>
+        )}
       </div>
 
       {k.totalContacts === 0 ? (

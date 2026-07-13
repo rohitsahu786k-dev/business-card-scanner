@@ -1264,8 +1264,12 @@ input,textarea,select{font-family:inherit}
 
 /* ---- Analytics dashboard ---- */
 .dashboard-page{display:flex;flex-direction:column;gap:18px}
+.dashboard-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .dashboard-head h2{font-size:20px;font-weight:800;color:var(--text)}
 .dashboard-head span{font-size:12px;color:var(--text2);font-weight:600}
+.enrich-btn{display:inline-flex;align-items:center;gap:8px;background:var(--red);color:#fff;border:none;border-radius:11px;padding:10px 16px;font-size:12.5px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px var(--red-glow)}
+.enrich-btn:hover{background:var(--red-hover)}
+.enrich-btn:disabled{opacity:.7;cursor:default}
 .insight-panel{display:flex;gap:11px;align-items:flex-start;background:linear-gradient(135deg,#fff,var(--red-light));border:1.5px solid rgba(230,50,50,.22);border-radius:14px;padding:14px 16px}
 .insight-panel i{color:var(--red);font-size:16px;margin-top:2px}
 .insight-panel p{font-size:13.5px;font-weight:600;color:var(--text);line-height:1.5}
