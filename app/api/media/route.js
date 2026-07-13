@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
+import mongoose from 'mongoose';
 import { authOptions } from '@/app/api/auth/[...nextauth]/route';
 import dbConnect from '@/lib/mongodb';
 import Media from '@/models/Media';
@@ -24,13 +25,22 @@ export async function POST(req) {
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const { title, base64Data, contactId } = await req.json();
-  if (!title || !base64Data) {
+  if (!title?.trim() || !base64Data) {
     return NextResponse.json({ error: 'Title and image file are required' }, { status: 400 });
   }
 
   await dbConnect();
 
   try {
+    let linkedContact = null;
+    if (contactId) {
+      if (!mongoose.isValidObjectId(contactId)) {
+        return NextResponse.json({ error: 'Invalid contact' }, { status: 400 });
+      }
+      linkedContact = await Contact.findOne({ _id: contactId, userId: session.user.id });
+      if (!linkedContact) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+    }
+
     // Upload image to Cloudinary
     const uploadResult = await uploadImage(base64Data, 'media');
 
@@ -47,7 +57,7 @@ export async function POST(req) {
 
     const newMedia = await Media.create({
       userId: session.user.id,
-      title,
+      title: title.trim(),
       url: uploadResult.url,
       publicId: uploadResult.publicId,
       fileSize,
@@ -56,8 +66,8 @@ export async function POST(req) {
     });
 
     // If contactId is provided, update that contact's card image
-    if (contactId) {
-      await Contact.findByIdAndUpdate(contactId, {
+    if (linkedContact) {
+      await Contact.findOneAndUpdate({ _id: linkedContact._id, userId: session.user.id }, {
         cardImage: uploadResult.url,
         cardImagePublicId: uploadResult.publicId,
       });
