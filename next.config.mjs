@@ -1,6 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  /* config options here */
+  // Keep the development status indicator away from the mobile bottom dock.
+  // The default bottom-left placement physically intercepts the Contacts tap.
+  devIndicators: {
+    position: 'top-right',
+  },
 };
 
 export default nextConfig;

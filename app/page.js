@@ -16,6 +16,29 @@ import { analyseVideoFrame, fingerprintDistance, getCardCrop } from '@/lib/card-
 const MAX_CONCURRENT_SCANS = 2;
 const USD_TO_INR = 84;
 
+const PAGE_META = {
+  contacts: { eyebrow: 'Relationship hub', title: 'My Contacts', subtitle: 'Search, organize and manage every connection.' },
+  projects: { eyebrow: 'Event workspace', title: 'Projects & Exhibitions', subtitle: 'Keep every event and its visitors perfectly organized.' },
+  media: { eyebrow: 'Asset library', title: 'Media Gallery', subtitle: 'Review card scans and linked visual assets.' },
+  scan: { eyebrow: 'Smart capture', title: 'Scan Visitors', subtitle: 'Automatically detect cards and QR contacts.' },
+  profile: { eyebrow: 'Personal settings', title: 'My Profile', subtitle: 'Manage your identity, photo and account security.' },
+  admin: { eyebrow: 'Administration', title: 'Admin Console', subtitle: 'Manage users and platform access.' },
+};
+
+const createEmptyContact = (projectId = '') => ({
+  name: '',
+  title: '',
+  company: '',
+  phone: '',
+  mobile: '',
+  email: '',
+  website: '',
+  address: '',
+  notes: '',
+  projectId: projectId || null,
+  favorite: false,
+});
+
 export default function Dashboard() {
   const { data: session, update } = useSession();
   const router = useRouter();
@@ -73,6 +96,7 @@ export default function Dashboard() {
   });
   const importFileInputRef = useRef(null);
   const bulkFileInputRef = useRef(null);
+  const pageContentRef = useRef(null);
 
   // Profile Edit State
   const [profileName, setProfileName] = useState('');
@@ -92,6 +116,54 @@ export default function Dashboard() {
   const [mediaFilter, setMediaFilter] = useState('all');
   const [mediaSort, setMediaSort] = useState('newest');
   const [mediaDensity, setMediaDensity] = useState('standard');
+
+  const openNewContact = () => {
+    setViewContact(null);
+    setEditContact(createEmptyContact(selectedProjectId));
+  };
+
+  const openContacts = (favoritesOnly = false) => {
+    stopCamera();
+    setFilterFavorite(favoritesOnly);
+    setSelectedProjectId('');
+    setActiveTab('contacts');
+    setMobileMenuOpen(false);
+  };
+
+  const openNavigationTab = (tab) => {
+    if (tab === 'scan') {
+      openScanner();
+      return;
+    }
+    stopCamera();
+    setActiveTab(tab);
+    setMobileMenuOpen(false);
+  };
+
+  const openDataTools = () => {
+    setMobileMenuOpen(false);
+    setToolsModalOpen(true);
+  };
+
+  // Each bottom-dock destination should open at its actionable top, even if
+  // the previous mobile page was scrolled deep into a long form or list.
+  useEffect(() => {
+    pageContentRef.current?.scrollTo({ top: 0, behavior: 'auto' });
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  }, [activeTab]);
+
+  // Prevent the page behind a mobile bottom sheet from moving while its own
+  // body remains independently scrollable.
+  useEffect(() => {
+    const modalOpen = Boolean(
+      viewContact || editContact || projectModal || adminUserModal
+      || mediaModal || viewLightbox || toolsModalOpen
+    );
+    if (!modalOpen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [viewContact, editContact, projectModal, adminUserModal, mediaModal, viewLightbox, toolsModalOpen]);
 
   // ---------------- FETCHING DATA ----------------
   const fetchContacts = async () => {
@@ -1151,59 +1223,90 @@ export default function Dashboard() {
       : name.slice(0, 2).toUpperCase();
   };
 
+  const currentPage = PAGE_META[activeTab] || PAGE_META.contacts;
+
   return (
     <div className="dashboard">
       {toast.message && <Toast key={toast.id} message={toast.message} type={toast.type} />}
 
       {/* Sidebar Overlay */}
-      <div className={`sidebar-overlay ${mobileMenuOpen ? 'open' : ''}`} onClick={() => setMobileMenuOpen(false)}></div>
+      <div className={`sidebar-overlay ${mobileMenuOpen ? 'open' : ''}`} onClick={() => setMobileMenuOpen(false)} aria-hidden="true"></div>
 
       {/* Sidebar */}
-      <aside className={`sidebar ${mobileMenuOpen ? 'open' : ''}`}>
+      <aside className={`sidebar ${mobileMenuOpen ? 'open' : ''}`} aria-label="Main navigation">
         <div className="sidebar-header">
-          <img src="/assets/logo-full.png" alt="OnePWS logo" />
+          <div className="sidebar-brand-lockup">
+            <img src="/assets/logo-full.png" alt="OnePWS logo" />
+            <span>CardScan Workspace</span>
+          </div>
+          <button type="button" className="sidebar-close" onClick={() => setMobileMenuOpen(false)} aria-label="Close navigation menu">
+            <span></span><span></span>
+          </button>
+        </div>
+
+        <div className="sidebar-workspace-card">
+          <span className="workspace-card-icon"><i className="fas fa-wand-magic-sparkles"></i></span>
+          <div>
+            <strong>Smart lead capture</strong>
+            <small>{contacts.length} contacts across {projects.length} workspaces</small>
+          </div>
         </div>
 
         <nav className="sidebar-nav">
-          <button className={`nav-item ${activeTab === 'contacts' ? 'active' : ''}`} onClick={() => { setActiveTab('contacts'); setMobileMenuOpen(false); }}>
+          <div className="nav-section">Workspace</div>
+          <button className={`nav-item ${activeTab === 'contacts' && !filterFavorite ? 'active' : ''}`} onClick={() => openContacts(false)}>
             <i className="fas fa-address-book"></i>
-            <span>Contacts</span>
+            <span>All Contacts</span>
             <span className="badge">{contacts.length}</span>
           </button>
-          <button className={`nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => { setActiveTab('projects'); setMobileMenuOpen(false); }}>
-            <i className="fas fa-folder"></i>
+          <button className={`nav-item ${activeTab === 'contacts' && filterFavorite ? 'active' : ''}`} onClick={() => openContacts(true)}>
+            <i className="fas fa-star"></i>
+            <span>Favorites</span>
+            <span className="badge subtle">{contacts.filter(contact => contact.favorite).length}</span>
+          </button>
+          <button className={`nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => openNavigationTab('projects')}>
+            <i className="fas fa-calendar-days"></i>
             <span>Projects / Exhibitions</span>
             <span className="badge">{projects.length}</span>
           </button>
-          <button className={`nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => { setActiveTab('media'); setMobileMenuOpen(false); }}>
-            <i className="fas fa-images"></i>
+          <button className={`nav-item nav-item-scan ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => openNavigationTab('scan')}>
+            <i className="fas fa-camera"></i>
+            <span>Smart Scanner</span>
+            <em>Auto</em>
+          </button>
+          <button className={`nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => openNavigationTab('media')}>
+            <i className="fas fa-photo-film"></i>
             <span>Media Gallery</span>
             <span className="badge">{mediaItems.length}</span>
           </button>
-          <button className={`nav-item ${activeTab === 'scan' ? 'active' : ''}`} onClick={openScanner}>
-            <i className="fas fa-qrcode"></i>
-            <span>Scan Card / QR</span>
+
+          <div className="nav-section">Data tools</div>
+          <button className="nav-item" onClick={openDataTools}>
+            <i className="fas fa-arrow-right-arrow-left"></i>
+            <span>Import / Export</span>
+          </button>
+          <button className="nav-item" onClick={() => { setMobileMenuOpen(false); handleExport('csv'); }}>
+            <i className="fas fa-file-arrow-down"></i>
+            <span>Download CSV</span>
           </button>
 
           <div className="nav-section">Account</div>
-          <button className={`nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => { setActiveTab('profile'); setMobileMenuOpen(false); }}>
-            <i className="fas fa-user-circle"></i>
+          <button className={`nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => openNavigationTab('profile')}>
+            <i className="fas fa-user-gear"></i>
             <span>My Profile</span>
           </button>
 
           {session.user.role === 'admin' && (
-            <>
-              <div className="nav-section">Admin Access</div>
-              <button className={`nav-item ${activeTab === 'admin' ? 'active' : ''}`} onClick={() => { setActiveTab('admin'); setMobileMenuOpen(false); }}>
-                <i className="fas fa-shield-halved"></i>
-                <span>User Management</span>
-              </button>
-            </>
+            <button className={`nav-item ${activeTab === 'admin' ? 'active' : ''}`} onClick={() => openNavigationTab('admin')}>
+              <i className="fas fa-shield-halved"></i>
+              <span>User Management</span>
+              <em>Admin</em>
+            </button>
           )}
         </nav>
 
         <div className="sidebar-footer">
-          <div className="user-info" onClick={() => { setActiveTab('profile'); setMobileMenuOpen(false); }}>
+          <button type="button" className="user-info" onClick={() => openNavigationTab('profile')}>
             <div className="user-avatar">
               {session.user.avatar ? <img src={session.user.avatar} alt="avatar" /> : getInitials(session.user.name)}
             </div>
@@ -1211,8 +1314,9 @@ export default function Dashboard() {
               <h4>{session.user.name}</h4>
               <p>{session.user.role === 'admin' ? 'Administrator' : 'Standard User'}</p>
             </div>
-          </div>
-          <button className="nav-item" onClick={() => signOut({ callbackUrl: '/login' })} style={{ color: 'var(--red)', marginTop: '8px' }}>
+            <i className="fas fa-chevron-right user-chevron"></i>
+          </button>
+          <button className="nav-item nav-item-logout" onClick={() => signOut({ callbackUrl: '/login' })}>
             <i className="fas fa-sign-out-alt"></i>
             <span>Sign Out</span>
           </button>
@@ -1223,20 +1327,29 @@ export default function Dashboard() {
       <main className="main-content">
         {/* Top Header */}
         <header className="top-header">
-          <div className="header-brand-mobile">
-            <img src="/assets/logo-full.png" alt="OnePWS logo" className="mobile-logo-full" />
+          <div className="header-leading">
+            <button
+              type="button"
+              className={`mobile-menu-trigger ${mobileMenuOpen ? 'open' : ''}`}
+              onClick={() => setMobileMenuOpen(true)}
+              aria-label="Open navigation menu"
+              aria-expanded={mobileMenuOpen}
+            >
+              <span className="menu-line"></span>
+              <span className="menu-line short"></span>
+              <span className="menu-line"></span>
+            </button>
+            <div className="header-brand-mobile">
+              <img src="/assets/logo-icon.png" alt="OnePWS" className="mobile-logo-icon" />
+            </div>
+            <div className="header-title-block">
+              <span>{currentPage.eyebrow}</span>
+              <h1>{currentPage.title}</h1>
+              <p>{currentPage.subtitle}</p>
+            </div>
           </div>
 
-          <h1>
-            {activeTab === 'contacts' && 'My Contacts'}
-            {activeTab === 'projects' && 'Projects & Exhibitions'}
-            {activeTab === 'media' && 'Media Gallery'}
-            {activeTab === 'scan' && 'Scan Visitors'}
-            {activeTab === 'profile' && 'My Profile'}
-            {activeTab === 'admin' && 'Admin Console'}
-          </h1>
-
-          <div className="top-header-actions">
+          <div className={`top-header-actions header-actions-${activeTab}`}>
             {activeTab === 'contacts' && (
               <>
                 <div className="header-search">
@@ -1248,13 +1361,13 @@ export default function Dashboard() {
                     onChange={(e) => setSearchQuery(e.target.value)}
                   />
                 </div>
-                <button className="icon-btn" onClick={() => setFilterFavorite(!filterFavorite)} title="Filter Favorites" style={{ borderColor: filterFavorite ? 'var(--red)' : '', color: filterFavorite ? 'var(--red)' : '' }}>
+                <button className={`icon-btn header-favorite-action ${filterFavorite ? 'active' : ''}`} onClick={() => setFilterFavorite(!filterFavorite)} title="Filter Favorites" aria-label="Filter favorite contacts">
                   <i className="fas fa-star"></i>
                 </button>
-                <button className="icon-btn" onClick={() => setToolsModalOpen(true)} title="Import / Export Data">
+                <button className="icon-btn header-secondary-action" onClick={openDataTools} title="Import / Export Data" aria-label="Open import and export tools">
                   <i className="fas fa-file-import"></i>
                 </button>
-                <button className="icon-btn" onClick={() => handleExport('csv')} title="Download all contacts as CSV" aria-label="Download all contacts as CSV">
+                <button className="icon-btn header-secondary-action" onClick={() => handleExport('csv')} title="Download all contacts as CSV" aria-label="Download all contacts as CSV">
                   <i className="fas fa-file-csv"></i>
                 </button>
                 <button className="btn-sm btn-quick-scan" onClick={openScanner}>
@@ -1275,17 +1388,24 @@ export default function Dashboard() {
                     onChange={(e) => setMediaSearchQuery(e.target.value)}
                   />
                 </div>
-                <button className="btn-sm" onClick={() => setMediaModal({ title: '', base64Data: '', contactId: '' })}>
+                <button className="btn-sm header-media-upload" onClick={() => setMediaModal({ title: '', base64Data: '', contactId: '' })}>
                   <i className="fas fa-upload"></i>
                   <span>Upload Media</span>
                 </button>
               </>
             )}
+            <button type="button" className="header-profile-button" onClick={() => openNavigationTab('profile')} aria-label="Open profile">
+              <span className="header-profile-avatar">
+                {session.user.avatar ? <img src={session.user.avatar} alt="" /> : getInitials(session.user.name)}
+              </span>
+              <span className="header-profile-copy"><strong>{session.user.name}</strong><small>{session.user.role}</small></span>
+              <i className="fas fa-chevron-down"></i>
+            </button>
           </div>
         </header>
 
         {/* Page Content */}
-        <div className="page-content">
+        <div className="page-content" ref={pageContentRef}>
           {loading ? (
             <div style={{ display: 'flex', flex: 1, height: '60vh', alignItems: 'center', justifyContent: 'center' }}>
               <div className="spinner" style={{ borderColor: 'var(--red)', borderTopColor: 'transparent', width: '32px', height: '32px' }}></div>
@@ -1295,6 +1415,20 @@ export default function Dashboard() {
               {/* ============ CONTACTS TAB ============ */}
               {activeTab === 'contacts' && (
                 <div>
+                  <div className="contacts-page-actions">
+                    <div className="contacts-page-copy">
+                      <strong>Contact directory</strong>
+                      <span>Add, open, edit, favorite, and export contacts.</span>
+                    </div>
+                    <div className="contacts-action-buttons">
+                      <button type="button" className="btn-outline contacts-tools-button" onClick={() => setToolsModalOpen(true)} aria-label="Open import and export tools">
+                        <i className="fas fa-arrow-right-arrow-left"></i><span>Import / Export</span>
+                      </button>
+                      <button type="button" className="btn-sm" onClick={openNewContact} aria-label="Add new contact">
+                        <i className="fas fa-user-plus"></i> Add Contact
+                      </button>
+                    </div>
+                  </div>
                   {selectedProjectId && (
                     <button className="context-back" onClick={() => { setSelectedProjectId(''); setActiveTab('projects'); }}>
                       <i className="fas fa-arrow-left"></i>
@@ -1426,7 +1560,7 @@ export default function Dashboard() {
                   <div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '10px' }}>
                       <p style={{ color: 'var(--text2)', fontSize: '14px', margin: 0 }}>Browse, search, and manage all uploaded business card scans and media assets.</p>
-                      <button className="btn-sm" onClick={() => setMediaModal({ title: '', base64Data: '', contactId: '' })}>
+                      <button className="btn-sm" onClick={() => setMediaModal({ title: '', base64Data: '', contactId: '' })} aria-label="Upload new media">
                         <i className="fas fa-plus"></i> Upload New Media
                       </button>
                     </div>
@@ -1582,13 +1716,13 @@ export default function Dashboard() {
                                 <span>{new Date(item.createdAt).toLocaleDateString()}</span>
                               </div>
                               <div className="media-card-actions">
-                                <button className="btn-view" onClick={() => setViewLightbox(item)} title="View Larger">
+                                <button className="btn-view" onClick={() => setViewLightbox(item)} title="View Larger" aria-label={`View ${item.title}`}>
                                   <i className="fas fa-search-plus"></i> View
                                 </button>
-                                <button className="btn-edit" onClick={() => setMediaModal({ id: item._id, title: item.title, url: item.url, contactId: item.contactId?._id || '' })} title="Edit details">
+                                <button className="btn-edit" onClick={() => setMediaModal({ id: item._id, title: item.title, url: item.url, contactId: item.contactId?._id || '' })} title="Edit details" aria-label={`Edit media ${item.title}`}>
                                   <i className="fas fa-pen"></i> Edit
                                 </button>
-                                <button className="btn-delete" onClick={() => handleDeleteMedia(item._id)} title="Delete File">
+                                <button className="btn-delete" onClick={() => handleDeleteMedia(item._id)} title="Delete File" aria-label={`Delete media ${item.title}`}>
                                   <i className="fas fa-trash"></i>
                                 </button>
                               </div>
@@ -1606,7 +1740,7 @@ export default function Dashboard() {
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
                     <p style={{ color: 'var(--text2)', fontSize: '14px' }}>Create a project or exhibition, scan visitors into it, then export the complete event list.</p>
-                    <button className="btn-sm" onClick={() => setProjectModal({ name: '', type: 'exhibition', description: '', eventDate: '', location: '' })}>
+                    <button className="btn-sm" onClick={() => setProjectModal({ name: '', type: 'exhibition', description: '', eventDate: '', location: '' })} aria-label="Add project or exhibition">
                       <i className="fas fa-plus"></i> New Project / Exhibition
                     </button>
                   </div>
@@ -1637,13 +1771,13 @@ export default function Dashboard() {
                             <i className="fas fa-user-friends"></i> {p.contactCount || 0} Contacts
                           </span>
                           <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '14px' }} onClick={e => e.stopPropagation()}>
-                            <button className="icon-btn project-csv-btn" onClick={() => handleDownloadProjectCSV(p._id)} title={`Export ${p.name} contacts as CSV`} style={{ width: '34px', height: '30px', fontSize: '12px' }}>
+                            <button className="icon-btn project-csv-btn" onClick={() => handleDownloadProjectCSV(p._id)} title={`Export ${p.name} contacts as CSV`} aria-label={`Export ${p.name} as CSV`} style={{ width: '34px', height: '30px', fontSize: '12px' }}>
                               <i className="fas fa-file-csv"></i>
                             </button>
-                            <button className="icon-btn" onClick={() => setProjectModal(p)} style={{ width: '30px', height: '30px', fontSize: '12px' }}>
+                            <button className="icon-btn" onClick={() => setProjectModal(p)} aria-label={`Edit ${p.name}`} style={{ width: '30px', height: '30px', fontSize: '12px' }}>
                               <i className="fas fa-pen"></i>
                             </button>
-                            <button className="icon-btn" onClick={() => handleDeleteProject(p._id)} style={{ width: '30px', height: '30px', fontSize: '12px', color: 'var(--red)' }}>
+                            <button className="icon-btn" onClick={() => handleDeleteProject(p._id)} aria-label={`Delete ${p.name}`} style={{ width: '30px', height: '30px', fontSize: '12px', color: 'var(--red)' }}>
                               <i className="fas fa-trash-can"></i>
                             </button>
                           </div>
@@ -1765,6 +1899,15 @@ export default function Dashboard() {
                             <div className="qr-live-pill">
                               <span className="live-dot"></span> QR + Card auto-detect ON
                             </div>
+                            <button
+                              type="button"
+                              className="preview-capture-btn"
+                              onClick={() => captureForBackground()}
+                              aria-label="Capture card now"
+                            >
+                              <i className="fas fa-camera"></i>
+                              <span>Capture</span>
+                            </button>
                           </>
                         ) : (
                           <div className="camera-off-state">
@@ -1939,7 +2082,7 @@ export default function Dashboard() {
                       </div>
                     </div>
 
-                    <form onSubmit={handleUpdateProfile}>
+                    <form id="profile-form" onSubmit={handleUpdateProfile}>
                       <div className="form-group">
                         <label>Full Name</label>
                         <input
@@ -2005,11 +2148,14 @@ export default function Dashboard() {
                         </div>
                       </div>
 
-                      <button type="submit" className="btn-primary" disabled={profileLoading} style={{ marginTop: '12px' }}>
+                      <button type="submit" className="btn-primary profile-desktop-save" disabled={profileLoading} style={{ marginTop: '12px' }}>
                         {profileLoading ? <span className="spinner"></span> : 'Save Profile Changes'}
                       </button>
                     </form>
                   </div>
+                  <button type="submit" form="profile-form" className="btn-primary profile-mobile-save" disabled={profileLoading}>
+                    {profileLoading ? <span className="spinner"></span> : <><i className="fas fa-floppy-disk"></i> Save Profile</>}
+                  </button>
                 </div>
               )}
 
@@ -2185,14 +2331,23 @@ export default function Dashboard() {
                 </div>
               )}
 
-              <div className="detail-actions">
-                <button className="btn-outline" style={{ flex: 1 }} onClick={() => { setEditContact(viewContact); setViewContact(null); }}>
-                  <i className="fas fa-edit"></i> Edit
-                </button>
-                <button className="btn-danger" style={{ flex: 1 }} onClick={() => handleDeleteContact(viewContact._id)}>
-                  <i className="fas fa-trash-can"></i> Delete
-                </button>
-              </div>
+            </div>
+            <div className="modal-footer detail-modal-footer">
+              <button
+                type="button"
+                className={`btn-favorite ${viewContact.favorite ? 'active' : ''}`}
+                onClick={() => handleToggleFavorite(viewContact)}
+                aria-label={viewContact.favorite ? 'Remove contact from favorites' : 'Add contact to favorites'}
+              >
+                <i className={`${viewContact.favorite ? 'fas' : 'far'} fa-star`}></i>
+                <span>{viewContact.favorite ? 'Saved' : 'Favorite'}</span>
+              </button>
+              <button type="button" className="btn-outline" onClick={() => { setEditContact(viewContact); setViewContact(null); }} aria-label="Edit contact">
+                <i className="fas fa-edit"></i> Edit
+              </button>
+              <button type="button" className="btn-danger" onClick={() => handleDeleteContact(viewContact._id)} aria-label="Delete contact">
+                <i className="fas fa-trash-can"></i> Delete
+              </button>
             </div>
           </div>
         </div>
@@ -2204,7 +2359,7 @@ export default function Dashboard() {
           <div className="modal-box" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
               <h2>{editContact._id ? 'Edit Contact' : 'New Business Contact'}</h2>
-              <button className="close-btn" onClick={() => setEditContact(null)}>
+              <button type="button" className="close-btn" onClick={() => setEditContact(null)} aria-label="Close contact form">
                 <i className="fas fa-times"></i>
               </button>
             </div>
@@ -2297,7 +2452,7 @@ export default function Dashboard() {
                 </div>
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn-outline" onClick={() => setEditContact(null)}>Cancel</button>
+                <button type="button" className="btn-outline" onClick={() => setEditContact(null)} aria-label="Cancel contact changes">Cancel</button>
                 <button type="submit" className="btn-primary">Save Contact</button>
               </div>
             </form>
@@ -2311,7 +2466,7 @@ export default function Dashboard() {
           <div className="modal-box" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
               <h2>{projectModal._id ? 'Edit Project / Exhibition' : 'New Project / Exhibition'}</h2>
-              <button className="close-btn" onClick={() => setProjectModal(null)}>
+              <button type="button" className="close-btn" onClick={() => setProjectModal(null)} aria-label="Close project form">
                 <i className="fas fa-times"></i>
               </button>
             </div>
@@ -2365,7 +2520,7 @@ export default function Dashboard() {
                 </div>
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn-outline" onClick={() => setProjectModal(null)}>Cancel</button>
+                <button type="button" className="btn-outline" onClick={() => setProjectModal(null)} aria-label="Cancel project changes">Cancel</button>
                 <button type="submit" className="btn-primary">Save & Select</button>
               </div>
             </form>
@@ -2451,7 +2606,7 @@ export default function Dashboard() {
           <div className="modal-box" onClick={e => e.stopPropagation()} style={{ maxWidth: '400px' }}>
             <div className="modal-head">
               <h2>Data Management Tools</h2>
-              <button className="close-btn" onClick={() => setToolsModalOpen(false)}>
+              <button type="button" className="close-btn" onClick={() => setToolsModalOpen(false)} aria-label="Close import and export tools">
                 <i className="fas fa-times"></i>
               </button>
             </div>
@@ -2495,26 +2650,27 @@ export default function Dashboard() {
       )}
 
       {/* Mobile Bottom Navigation Bar */}
-      <nav className="mobile-bottom-nav">
-        <button className={`mobile-nav-item ${activeTab === 'contacts' ? 'active' : ''}`} onClick={() => setActiveTab('contacts')}>
+      <nav className="mobile-bottom-nav" aria-label="Quick navigation">
+        <button className={`mobile-nav-item ${activeTab === 'contacts' ? 'active' : ''}`} onClick={() => openContacts(false)} aria-label="Contacts">
           <i className="fas fa-address-book"></i>
           <span>Contacts</span>
         </button>
-        <button className={`mobile-nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => setActiveTab('projects')}>
-          <i className="fas fa-folder"></i>
+        <button className={`mobile-nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => openNavigationTab('projects')} aria-label="Projects and exhibitions">
+          <i className="fas fa-calendar-days"></i>
           <span>Events</span>
         </button>
-        <button className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''}`} onClick={openScanner} aria-label="Open automatic scanner">
+        <button className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''}`} onClick={() => openNavigationTab('scan')} aria-label="Open automatic scanner">
           <div className="scan-btn-inner">
             <i className="fas fa-camera"></i>
           </div>
+          <span className="scan-nav-label">Scan</span>
         </button>
-        <button className={`mobile-nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => setActiveTab('media')}>
-          <i className="fas fa-images"></i>
+        <button className={`mobile-nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => openNavigationTab('media')} aria-label="Media gallery">
+          <i className="fas fa-photo-film"></i>
           <span>Media</span>
         </button>
-        <button className={`mobile-nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => setActiveTab('profile')}>
-          <i className="fas fa-user-circle"></i>
+        <button className={`mobile-nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => openNavigationTab('profile')} aria-label="Profile">
+          <i className="fas fa-user-gear"></i>
           <span>Profile</span>
         </button>
       </nav>
@@ -2525,7 +2681,7 @@ export default function Dashboard() {
           <div className="modal-box" onClick={e => e.stopPropagation()} style={{ maxWidth: '480px' }}>
             <div className="modal-head">
               <h2>{mediaModal.id ? 'Edit Media Details' : 'Upload New Media'}</h2>
-              <button className="close-btn" onClick={() => setMediaModal(null)}>
+              <button type="button" className="close-btn" onClick={() => setMediaModal(null)} aria-label="Close media form">
                 <i className="fas fa-times"></i>
               </button>
             </div>
@@ -2608,8 +2764,8 @@ export default function Dashboard() {
               </div>
 
               <div className="modal-footer">
-                <button type="button" className="btn-outline" onClick={() => setMediaModal(null)}>Cancel</button>
-                <button type="submit" className="btn-primary" disabled={mediaLoading}>
+                <button type="button" className="btn-outline" onClick={() => setMediaModal(null)} aria-label="Cancel media changes">Cancel</button>
+                <button type="submit" className="btn-primary" disabled={mediaLoading} aria-label={mediaModal.id ? 'Save media changes' : 'Upload media'}>
                   {mediaLoading ? (
                     <div className="spinner" style={{ width: '18px', height: '18px', borderTopColor: 'transparent', borderColor: '#fff' }}></div>
                   ) : (
@@ -2626,7 +2782,7 @@ export default function Dashboard() {
       {viewLightbox && (
         <div className="lightbox-overlay" onClick={() => setViewLightbox(null)}>
           <div className="lightbox-content" onClick={e => e.stopPropagation()}>
-            <button className="lightbox-close" onClick={() => setViewLightbox(null)}>
+            <button type="button" className="lightbox-close" onClick={() => setViewLightbox(null)} aria-label="Close media preview">
               <i className="fas fa-times"></i>
             </button>
             <img src={viewLightbox.url} alt={viewLightbox.title} className="lightbox-img" />

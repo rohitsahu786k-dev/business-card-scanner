@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
+import mongoose from 'mongoose';
 import { authOptions } from '@/app/api/auth/[...nextauth]/route';
 import dbConnect from '@/lib/mongodb';
 import Project from '@/models/Project';
@@ -11,6 +12,9 @@ export async function PUT(req, { params }) {
     if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const { id } = await params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: 'Invalid project / exhibition ID' }, { status: 400 });
+    }
     await dbConnect();
     const data = await req.json();
 
@@ -31,7 +35,7 @@ export async function PUT(req, { params }) {
     const project = await Project.findOneAndUpdate(
       { _id: id, userId: session.user.id },
       updateData,
-      { new: true }
+      { returnDocument: 'after', runValidators: true }
     );
 
     if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
@@ -48,6 +52,9 @@ export async function DELETE(req, { params }) {
     if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     const { id } = await params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: 'Invalid project / exhibition ID' }, { status: 400 });
+    }
     await dbConnect();
 
     const project = await Project.findOneAndDelete({ _id: id, userId: session.user.id });
