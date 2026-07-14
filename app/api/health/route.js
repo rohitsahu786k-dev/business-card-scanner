@@ -25,10 +25,17 @@ export async function GET() {
 
   const status = database === 'connected' ? 'ok' : 'degraded';
 
+  // Which commit is actually serving. Vercel injects this at build time, so it
+  // answers "did my push deploy, or is the old build still live?" — the previous
+  // deployment keeps serving when a build fails, which otherwise looks identical
+  // to a successful one.
+  const commit = (process.env.VERCEL_GIT_COMMIT_SHA || 'local').slice(0, 7);
+
   return NextResponse.json(
     {
       status,
       database,
+      commit,
       cloudinaryConfigured,
       openAIConfigured,
       authConfigured,
