@@ -1,86 +1,108 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
-import { INDIA_BBOX, INDIA_BORDER } from '@/lib/geo';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { INDIA_PATH_TRANSFORM, MAP_ASPECT, projectPoint } from '@/lib/geo';
+import { INDIA_STATES } from '@/lib/india-map';
+import { formatInr, formatUsd } from '@/lib/config';
 
-// Brand-led categorical palette (OnePWS red first), used for donut/bar series.
-const PALETTE = ['#e63232', '#2563eb', '#16a34a', '#f59e0b', '#8b5cf6', '#0891b2', '#db2777', '#65a30d'];
+// Categorical hues, assigned in fixed order and never cycled. Validated for the
+// light chart surface (lightness band, chroma floor, CVD separation, contrast).
+const CATEGORICAL = ['#e63232', '#2563eb', '#0e9f6e', '#d97706', '#8b5cf6', '#0891b2', '#db2777', '#65a30d'];
 
-const MAP_W = 440;
-const MAP_H = 500;
-const projX = (lng) => ((lng - INDIA_BBOX.lngMin) / (INDIA_BBOX.lngMax - INDIA_BBOX.lngMin)) * MAP_W;
-const projY = (lat) => ((INDIA_BBOX.latMax - lat) / (INDIA_BBOX.latMax - INDIA_BBOX.latMin)) * MAP_H;
+// Single hues for magnitude (one-series) charts — one hue per chart, never a
+// hue per bar, so length is the only thing encoding value.
+const HUE = {
+  brand: '#e63232',
+  blue: '#2563eb',
+  violet: '#8b5cf6',
+  teal: '#0891b2',
+  amber: '#d97706',
+  green: '#0e9f6e',
+};
 
-function IndiaMap({ points }) {
-  const [active, setActive] = useState(null);
-  if (!points.length) {
-    return <p className="chart-empty">No mapped locations yet. Run AI enrichment so contacts get a city and appear here.</p>;
-  }
-  const max = Math.max(...points.map(p => p.count), 1);
-  const border = INDIA_BORDER
-    .map(([lat, lng], i) => `${i ? 'L' : 'M'}${projX(lng).toFixed(1)} ${projY(lat).toFixed(1)}`)
-    .join(' ') + ' Z';
+const RANGES = [
+  { id: '7d', label: '7 days', days: 7 },
+  { id: '30d', label: '30 days', days: 30 },
+  { id: '90d', label: '90 days', days: 90 },
+  { id: 'all', label: 'All time', days: null },
+];
+
+const fmtInt = (n) => new Intl.NumberFormat('en-IN').format(n || 0);
+const pct = (part, whole) => (whole ? Math.round((part / whole) * 100) : 0);
+
+/* ------------------------------------------------------------------ Tooltip */
+// One floating tooltip shared by every chart on the page, positioned against the
+// dashboard container so it can never be clipped by a chart card's overflow.
+function useTooltip() {
+  const [tip, setTip] = useState(null); // { x, y, title, rows: [[label, value]] }
+  const hostRef = useRef(null);
+
+  const show = useCallback((event, content) => {
+    const host = hostRef.current;
+    if (!host) return;
+    const box = host.getBoundingClientRect();
+    setTip({ ...content, x: event.clientX - box.left, y: event.clientY - box.top });
+  }, []);
+  const hide = useCallback(() => setTip(null), []);
+
+  const node = tip ? (
+    <div className="dash-tooltip" style={{ left: tip.x, top: tip.y }} role="tooltip">
+      <strong>{tip.title}</strong>
+      {tip.rows.map(([label, value]) => (
+        <span key={label}><i>{label}</i><b>{value}</b></span>
+      ))}
+    </div>
+  ) : null;
+
+  return { hostRef, show, hide, node };
+}
+
+/* ------------------------------------------------------------------- Charts */
+
+function Kpi({ label, value, sub, tone, hero }) {
   return (
-    <div className="india-map">
-      <svg viewBox={`0 0 ${MAP_W} ${MAP_H}`} className="india-map-svg" role="img" aria-label="India contact distribution map" onMouseLeave={() => setActive(null)}>
-        <path d={border} className="india-outline" />
-        {points.map((p) => {
-          const r = 6 + Math.sqrt(p.count / max) * 22;
-          return (
-            <circle
-              key={`${p.label}-${p.lat}-${p.lng}`}
-              cx={projX(p.lng)}
-              cy={projY(p.lat)}
-              r={r}
-              className={`map-bubble ${active && active.label === p.label ? 'active' : ''}`}
-              onMouseEnter={() => setActive(p)}
-            >
-              <title>{`${p.label}: ${p.count} contacts`}</title>
-            </circle>
-          );
-        })}
-      </svg>
-      <div className="map-detail">
-        {active ? (
-          <>
-            <strong>{active.label}</strong>
-            <ul>
-              <li><span>Contacts</span><b>{active.count}</b></li>
-              <li><span>Companies</span><b>{active.companies}</b></li>
-              <li><span>Decision makers</span><b>{active.decisionMakers}</b></li>
-            </ul>
-          </>
-        ) : (
-          <>
-            <strong>{points.length} location{points.length === 1 ? '' : 's'}</strong>
-            <span className="map-hint">Hover a bubble for city details.</span>
-            <ul className="map-toplist">
-              {points.slice(0, 6).map((p) => (
-                <li key={p.label}><span>{p.label}</span><b>{p.count}</b></li>
-              ))}
-            </ul>
-          </>
-        )}
-      </div>
+    <div className={`dash-kpi${hero ? ' hero' : ''}${tone ? ` tone-${tone}` : ''}`}>
+      <span className="dash-kpi-label">{label}</span>
+      <strong className="dash-kpi-value">{value}</strong>
+      {sub && <span className="dash-kpi-sub">{sub}</span>}
     </div>
   );
 }
 
-function Donut({ data }) {
-  const total = data.reduce((sum, d) => sum + d.value, 0);
-  const radius = 52;
-  const circumference = 2 * Math.PI * radius;
-  // Precompute each segment's cumulative offset functionally (no render-time
-  // variable reassignment) so the SVG arcs stack correctly.
-  const segments = [];
-  data.reduce((acc, d, i) => {
-    const dash = total ? (d.value / total) * circumference : 0;
-    segments.push({ label: d.label, value: d.value, dash, offset: acc, color: PALETTE[i % PALETTE.length] });
-    return acc + dash;
-  }, 0);
-  if (!total) return null;
+function Timeline({ data, onHover, onLeave }) {
+  if (!data.length) return <p className="dash-empty">No captures in this period.</p>;
+  const max = Math.max(...data.map(d => d.value), 1);
+  const label = (iso) => new Date(`${iso}T00:00:00`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  // Only label the ends and the middle — a date under every bar is unreadable.
+  const ticks = new Set([0, Math.floor((data.length - 1) / 2), data.length - 1]);
   return (
-    <div className="donut-wrap">
-      <svg viewBox="0 0 140 140" className="donut-svg" role="img" aria-label="Distribution donut chart">
+    <div className="dash-timeline" onMouseLeave={onLeave}>
+      {data.map((d, i) => (
+        <div
+          className="dash-timeline-col"
+          key={d.date}
+          onMouseMove={(e) => onHover(e, { title: label(d.date), rows: [['Contacts', fmtInt(d.value)]] })}
+        >
+          <span className="dash-timeline-bar" style={{ height: `${Math.max((d.value / max) * 100, 3)}%` }} />
+          <small>{ticks.has(i) ? label(d.date) : ' '}</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Donut({ data, total, unit }) {
+  const radius = 54;
+  const circumference = 2 * Math.PI * radius;
+  const segments = [];
+  data.reduce((offset, d, i) => {
+    const dash = total ? (d.value / total) * circumference : 0;
+    segments.push({ ...d, dash, offset, color: CATEGORICAL[i % CATEGORICAL.length] });
+    return offset + dash;
+  }, 0);
+  if (!total) return <p className="dash-empty">Nothing to show yet.</p>;
+  return (
+    <div className="dash-donut">
+      <svg viewBox="0 0 140 140" role="img" aria-label={`${unit} breakdown`}>
         <g transform="translate(70,70) rotate(-90)">
           {segments.map((s) => (
             <circle
@@ -88,20 +110,23 @@ function Donut({ data }) {
               r={radius}
               fill="none"
               stroke={s.color}
-              strokeWidth="16"
-              strokeDasharray={`${s.dash} ${circumference - s.dash}`}
+              strokeWidth="14"
+              /* 2px surface gap between adjacent segments */
+              strokeDasharray={`${Math.max(s.dash - 2, 0)} ${circumference - Math.max(s.dash - 2, 0)}`}
               strokeDashoffset={-s.offset}
             />
           ))}
         </g>
-        <text x="70" y="66" textAnchor="middle" className="donut-total">{total}</text>
-        <text x="70" y="84" textAnchor="middle" className="donut-sub">scans</text>
+        <text x="70" y="67" textAnchor="middle" className="dash-donut-total">{fmtInt(total)}</text>
+        <text x="70" y="85" textAnchor="middle" className="dash-donut-sub">{unit}</text>
       </svg>
-      <ul className="donut-legend">
+      <ul className="dash-legend">
         {segments.map((s) => (
           <li key={s.label}>
-            <span className="legend-dot" style={{ background: s.color }}></span>
-            {s.label}<strong>{s.value}</strong>
+            <span className="dash-swatch" style={{ background: s.color }} aria-hidden="true" />
+            <span className="dash-legend-label">{s.label}</span>
+            <b>{fmtInt(s.value)}</b>
+            <i>{pct(s.value, total)}%</i>
           </li>
         ))}
       </ul>
@@ -109,74 +134,142 @@ function Donut({ data }) {
   );
 }
 
-function BarList({ data, accent = '#e63232', emptyLabel }) {
-  if (!data.length) return <p className="chart-empty">{emptyLabel}</p>;
+function BarList({ data, hue = HUE.brand, empty }) {
+  if (!data.length) return <p className="dash-empty">{empty}</p>;
   const max = Math.max(...data.map(d => d.value), 1);
   return (
-    <ul className="bar-list">
+    <ul className="dash-bars">
       {data.map((d) => (
         <li key={d.label}>
-          <span className="bar-label" title={d.label}>{d.label}</span>
-          <span className="bar-track">
-            <span className="bar-fill" style={{ width: `${(d.value / max) * 100}%`, background: accent }}></span>
+          <span className="dash-bar-label" title={d.label}>{d.label}</span>
+          <span className="dash-bar-track">
+            <span className="dash-bar-fill" style={{ width: `${(d.value / max) * 100}%`, background: hue }} />
           </span>
-          <span className="bar-value">{d.value}</span>
+          <b className="dash-bar-value">{fmtInt(d.value)}</b>
         </li>
       ))}
     </ul>
   );
 }
 
-function Timeline({ data }) {
-  if (!data.length) return <p className="chart-empty">No scans in this period yet.</p>;
-  const max = Math.max(...data.map(d => d.value), 1);
+function IndiaMap({ points, onHover, onLeave }) {
+  const [active, setActive] = useState(null);
+  const max = Math.max(...points.map(p => p.count), 1);
+  // Draw the biggest bubbles first so small ones stay clickable on top of them.
+  const ordered = [...points].sort((a, b) => b.count - a.count);
+
   return (
-    <div className="timeline-chart" role="img" aria-label="Contacts captured over time">
-      {data.map((d) => (
-        <div className="timeline-col" key={d.date} title={`${d.date}: ${d.value}`}>
-          <span className="timeline-bar" style={{ height: `${Math.max((d.value / max) * 100, 4)}%` }}></span>
-          <small>{d.date.slice(5)}</small>
-        </div>
-      ))}
+    <div className="dash-map">
+      <svg
+        viewBox={`-1 -1 ${MAP_ASPECT.width + 2} ${MAP_ASPECT.height + 2}`}
+        className="dash-map-svg"
+        role="img"
+        aria-label="Contacts by location across India"
+        onMouseLeave={() => { setActive(null); onLeave(); }}
+      >
+        <g transform={INDIA_PATH_TRANSFORM}>
+          {INDIA_STATES.map((s) => (
+            <path key={s.name} d={s.d} className="dash-map-state" vectorEffect="non-scaling-stroke">
+              <title>{s.name}</title>
+            </path>
+          ))}
+        </g>
+        {ordered.map((p) => {
+          const { x, y } = projectPoint(p.lat, p.lng);
+          // Area-proportional radius, floored so a single contact is still visible.
+          const r = 0.5 + Math.sqrt(p.count / max) * 1.9;
+          return (
+            <circle
+              key={`${p.label}-${p.lat}-${p.lng}`}
+              cx={x}
+              cy={y}
+              r={r}
+              className={`dash-map-bubble${active === p.label ? ' active' : ''}`}
+              vectorEffect="non-scaling-stroke"
+              onMouseMove={(e) => {
+                setActive(p.label);
+                onHover(e, {
+                  title: p.label,
+                  rows: [
+                    ['Contacts', fmtInt(p.count)],
+                    ['Companies', fmtInt(p.companies)],
+                    ['Decision makers', fmtInt(p.decisionMakers)],
+                  ],
+                });
+              }}
+            />
+          );
+        })}
+      </svg>
+      <div className="dash-map-side">
+        <h4>Top locations</h4>
+        {points.length === 0 ? (
+          <p className="dash-empty">No locations resolved yet. Run AI enrichment so contacts get a city.</p>
+        ) : (
+          <ol className="dash-map-list">
+            {ordered.slice(0, 8).map((p) => (
+              <li
+                key={p.label}
+                className={active === p.label ? 'active' : ''}
+                onMouseEnter={() => setActive(p.label)}
+                onMouseLeave={() => setActive(null)}
+              >
+                <span>{p.label}</span>
+                <b>{fmtInt(p.count)}</b>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
     </div>
   );
 }
 
-function Kpi({ label, value, sub, accent }) {
-  return (
-    <div className="kpi-card">
-      <span className="kpi-label">{label}</span>
-      <strong className="kpi-value" style={accent ? { color: accent } : undefined}>{value}</strong>
-      {sub && <span className="kpi-sub">{sub}</span>}
-    </div>
-  );
-}
+/* ---------------------------------------------------------------- Dashboard */
 
 export default function AnalyticsDashboard({ projectId, projectName }) {
-  // Parent remounts this component via key={projectId}, so initial state below
-  // is the reset — the effect only sets state from async callbacks.
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
   const [enriching, setEnriching] = useState(false);
-  const [tick, setTick] = useState(0);
+  const [enrichProgress, setEnrichProgress] = useState(0);
+  const [range, setRange] = useState('all');
+  const [showTable, setShowTable] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const { hostRef, show, hide, node: tooltip } = useTooltip();
+
+  // What is on screen is whatever the last settled fetch produced, tagged with
+  // the query it answered. Anything else means a newer query is still in flight,
+  // so `loading` is derived rather than flipped by hand in the effect.
+  const queryKey = `${projectId || 'all'}|${range}|${reloadKey}`;
+  const [view, setView] = useState({ key: null, data: null, error: '' });
+  const loading = view.key !== queryKey;
+  const { data, error } = view;
 
   useEffect(() => {
     let cancelled = false;
-    const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : '';
-    fetch(`/api/analytics${qs}`)
+    const params = new URLSearchParams();
+    if (projectId) params.set('projectId', projectId);
+    const days = RANGES.find(r => r.id === range)?.days;
+    if (days) {
+      const from = new Date();
+      from.setDate(from.getDate() - days);
+      from.setHours(0, 0, 0, 0);
+      params.set('startDate', from.toISOString());
+    }
+    fetch(`/api/analytics?${params.toString()}`)
       .then(res => (res.ok ? res.json() : Promise.reject(new Error('load failed'))))
-      .then(json => { if (!cancelled) { setData(json); setLoading(false); } })
-      .catch(() => { if (!cancelled) { setError('Could not load analytics. Please refresh.'); setLoading(false); } });
+      .then(json => { if (!cancelled) setView({ key: queryKey, data: json, error: '' }); })
+      .catch(() => {
+        if (!cancelled) setView({ key: queryKey, data: null, error: 'Could not load analytics. Please refresh.' });
+      });
     return () => { cancelled = true; };
-  }, [projectId, tick]);
+  }, [projectId, range, queryKey]);
 
-  // Backfill enrichment for contacts scanned before enrichment ran. Loops the
-  // batch endpoint (20/call) until the queue drains, then reloads analytics.
+  // Drain the enrichment backlog (the endpoint processes 20 per call), then
+  // reload so the industry / seniority / location charts fill in.
   const runEnrichment = async () => {
     setEnriching(true);
+    setEnrichProgress(0);
     try {
-      for (let i = 0; i < 15; i += 1) {
+      for (let i = 0; i < 25; i += 1) {
         const res = await fetch('/api/enrich', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -184,126 +277,155 @@ export default function AnalyticsDashboard({ projectId, projectName }) {
         });
         if (!res.ok) break;
         const r = await res.json();
+        setEnrichProgress(p => p + (r.processed || 0));
         if (!r.processed || r.remaining === 0) break;
       }
     } catch {
-      // ignore — partial progress still persists; user can re-run.
+      // Partial progress still persists — the button simply reappears.
     } finally {
       setEnriching(false);
-      setTick(t => t + 1);
+      setReloadKey(k => k + 1);
     }
   };
 
   const insight = useMemo(() => {
-    if (!data) return '';
+    if (!data || !data.kpis.totalContacts) return '';
     const k = data.kpis;
-    const bits = [];
-    bits.push(`${k.totalContacts} contact${k.totalContacts === 1 ? '' : 's'} captured across ${k.uniqueCompanies} compan${k.uniqueCompanies === 1 ? 'y' : 'ies'}.`);
+    const bits = [`${fmtInt(k.totalContacts)} contact${k.totalContacts === 1 ? '' : 's'} captured across ${fmtInt(k.uniqueCompanies)} compan${k.uniqueCompanies === 1 ? 'y' : 'ies'}.`];
     if (data.topCompanies[0]) bits.push(`${data.topCompanies[0].label} leads with ${data.topCompanies[0].value}.`);
-    if (k.duplicatesPrevented) bits.push(`${k.duplicatesPrevented} duplicate scan${k.duplicatesPrevented === 1 ? '' : 's'} prevented.`);
+    if (k.decisionMakers) bits.push(`${fmtInt(k.decisionMakers)} decision maker${k.decisionMakers === 1 ? '' : 's'} identified.`);
+    if (k.duplicatesPrevented) bits.push(`${fmtInt(k.duplicatesPrevented)} duplicate scan${k.duplicatesPrevented === 1 ? '' : 's'} prevented.`);
     if (data.industries[0]) bits.push(`Top industry: ${data.industries[0].label}.`);
-    else if (k.pendingEnrichment) bits.push(`${k.pendingEnrichment} contacts awaiting AI enrichment for industry & seniority insights.`);
+    else if (k.pendingEnrichment) bits.push(`${fmtInt(k.pendingEnrichment)} contacts still awaiting AI enrichment.`);
     return bits.join(' ');
   }, [data]);
 
   if (loading) {
     return (
-      <div className="dashboard-page">
-        <div className="kpi-grid">
-          {Array.from({ length: 8 }).map((_, i) => <div key={i} className="kpi-card skeleton" />)}
+      <div className="dash">
+        <div className="dash-kpis">
+          {Array.from({ length: 6 }).map((_, i) => <div key={i} className="dash-kpi skeleton" />)}
         </div>
-        <div className="chart-grid">
-          {Array.from({ length: 4 }).map((_, i) => <div key={i} className="chart-card skeleton" style={{ height: 240 }} />)}
+        <div className="dash-charts">
+          {Array.from({ length: 4 }).map((_, i) => <div key={i} className="dash-card skeleton" style={{ height: 260 }} />)}
         </div>
       </div>
     );
   }
 
-  if (error) return <div className="dashboard-page"><p className="chart-empty">{error}</p></div>;
+  if (error) {
+    return (
+      <div className="dash">
+        <div className="dash-card">
+          <p className="dash-empty">{error}</p>
+          <button type="button" className="btn-outline" onClick={() => setReloadKey(k => k + 1)}>Retry</button>
+        </div>
+      </div>
+    );
+  }
 
   const k = data.kpis;
-  const emptyEnrich = 'Pending AI enrichment — available after the enrichment phase.';
+  const scanTotal = data.scanMethods.reduce((sum, s) => sum + s.value, 0);
+  const needsEnrichment = 'No data yet — run AI enrichment to classify captured contacts.';
 
   return (
-    <div className="dashboard-page">
-      <div className="dashboard-head">
+    <div className="dash" ref={hostRef}>
+      {tooltip}
+
+      <header className="dash-head">
         <div>
-          <h2>Analytics</h2>
-          <span>{projectName || 'All contacts'} · updated {new Date(data.generatedAt).toLocaleTimeString()}</span>
+          <h2>{projectName || 'All contacts'}</h2>
+          <p>Updated {new Date(data.generatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
         </div>
-        {k.pendingEnrichment > 0 && (
-          <button type="button" className="enrich-btn" onClick={runEnrichment} disabled={enriching}>
-            <i className={`fas ${enriching ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'}`}></i>
-            {enriching ? 'Enriching…' : `Run AI enrichment (${k.pendingEnrichment})`}
-          </button>
-        )}
-      </div>
+        <div className="dash-head-actions">
+          <div className="dash-range" role="group" aria-label="Time range">
+            {RANGES.map(r => (
+              <button
+                key={r.id}
+                type="button"
+                className={range === r.id ? 'active' : ''}
+                onClick={() => setRange(r.id)}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+          {k.pendingEnrichment > 0 && (
+            <button type="button" className="dash-enrich" onClick={runEnrichment} disabled={enriching}>
+              <i className={`fas ${enriching ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'}`} />
+              {enriching ? `Enriching… ${enrichProgress}` : `Enrich ${k.pendingEnrichment}`}
+            </button>
+          )}
+        </div>
+      </header>
 
       {k.totalContacts === 0 ? (
-        <p className="chart-empty">No contacts captured yet. Scan a card to see analytics here.</p>
+        <div className="dash-card dash-blank">
+          <i className="fas fa-chart-line" />
+          <h3>No contacts in this view</h3>
+          <p>Scan a card — or widen the time range — and the analytics will fill in here.</p>
+        </div>
       ) : (
         <>
-          <div className="insight-panel">
-            <i className="fas fa-wand-magic-sparkles"></i>
-            <p>{insight}</p>
+          <p className="dash-insight"><i className="fas fa-wand-magic-sparkles" aria-hidden="true" />{insight}</p>
+
+          <div className="dash-kpis">
+            <Kpi hero label="Contacts captured" value={fmtInt(k.totalContacts)} sub={`${fmtInt(k.uniqueCompanies)} unique companies`} tone="brand" />
+            <Kpi label="Decision makers" value={fmtInt(k.decisionMakers)} sub={`${pct(k.decisionMakers, k.totalContacts)}% of contacts`} />
+            <Kpi label="High-priority leads" value={fmtInt(k.highPriorityLeads)} sub={`${pct(k.highPriorityLeads, k.totalContacts)}% of contacts`} tone="good" />
+            <Kpi label="Data completeness" value={`${k.dataCompleteness}%`} sub="Across 5 core fields" />
+            <Kpi label="Duplicates prevented" value={fmtInt(k.duplicatesPrevented)} sub="Merged, not re-created" />
+            <Kpi label="AI scan cost" value={formatUsd(k.totalCost)} sub={`≈ ${formatInr(k.totalCost)} · ${fmtInt(k.qrScans)} QR scans were free`} />
           </div>
 
-          <div className="kpi-grid">
-            <Kpi label="Total Contacts" value={k.totalContacts} accent="#e63232" />
-            <Kpi label="Unique Companies" value={k.uniqueCompanies} />
-            <Kpi label="With Email" value={k.withEmail} sub={`${k.totalContacts ? Math.round((k.withEmail / k.totalContacts) * 100) : 0}%`} />
-            <Kpi label="With Mobile" value={k.withMobile} sub={`${k.totalContacts ? Math.round((k.withMobile / k.totalContacts) * 100) : 0}%`} />
-            <Kpi label="Front + Back Cards" value={k.frontAndBack} />
-            <Kpi label="Duplicates Prevented" value={k.duplicatesPrevented} accent="#16a34a" />
-            <Kpi label="AI Scans" value={k.aiScans} />
-            <Kpi label="QR / vCard Scans" value={k.qrScans} />
-            <Kpi label="Data Completeness" value={`${k.dataCompleteness}%`} />
-            <Kpi label="Decision Makers" value={k.decisionMakers} sub={k.decisionMakers ? undefined : 'needs enrichment'} />
-            <Kpi label="High-Priority Leads" value={k.highPriorityLeads} sub={k.highPriorityLeads ? undefined : 'needs enrichment'} />
-            <Kpi label="Total AI Scan Cost" value={`$${k.totalCost.toFixed(4)}`} />
+          <div className="dash-strip">
+            <span><i className="fas fa-envelope" />{fmtInt(k.withEmail)} with email<b>{pct(k.withEmail, k.totalContacts)}%</b></span>
+            <span><i className="fas fa-mobile-screen" />{fmtInt(k.withMobile)} with mobile<b>{pct(k.withMobile, k.totalContacts)}%</b></span>
+            <span><i className="fas fa-clone" />{fmtInt(k.frontAndBack)} front + back<b>{pct(k.frontAndBack, k.totalContacts)}%</b></span>
+            <span><i className="fas fa-star" />{fmtInt(k.favorites)} favorites<b>{pct(k.favorites, k.totalContacts)}%</b></span>
           </div>
 
-          <div className="chart-grid">
-            <div className="chart-card wide">
-              <h3>Contact Capture Timeline</h3>
-              <Timeline data={data.timeline} />
-            </div>
+          <div className="dash-charts">
+            <section className="dash-card span-2">
+              <h3>Capture timeline</h3>
+              <Timeline data={data.timeline} onHover={show} onLeave={hide} />
+            </section>
 
-            <div className="chart-card wide">
-              <h3>Location — India Map</h3>
-              <IndiaMap points={data.map || []} />
-            </div>
+            <section className="dash-card span-2 dash-card-map">
+              <h3>Where contacts come from</h3>
+              <IndiaMap points={data.map || []} onHover={show} onLeave={hide} />
+            </section>
 
-            <div className="chart-card">
-              <h3>Scan Method</h3>
-              <Donut data={data.scanMethods} />
-            </div>
+            <section className="dash-card">
+              <h3>Scan method</h3>
+              <Donut data={data.scanMethods} total={scanTotal} unit="scans" />
+            </section>
 
-            <div className="chart-card">
-              <h3>Top Companies</h3>
-              <BarList data={data.topCompanies} emptyLabel="No company data yet." />
-            </div>
-
-            <div className="chart-card">
+            <section className="dash-card">
               <h3>Industries</h3>
-              <BarList data={data.industries} accent="#2563eb" emptyLabel={emptyEnrich} />
-            </div>
+              <BarList data={data.industries.slice(0, 8)} hue={HUE.blue} empty={needsEnrichment} />
+            </section>
 
-            <div className="chart-card">
+            <section className="dash-card">
               <h3>Seniority</h3>
-              <BarList data={data.seniority} accent="#8b5cf6" emptyLabel={emptyEnrich} />
-            </div>
+              <BarList data={data.seniority.slice(0, 8)} hue={HUE.violet} empty={needsEnrichment} />
+            </section>
 
-            <div className="chart-card">
-              <h3>Top Cities</h3>
-              <BarList data={data.cities} accent="#0891b2" emptyLabel={emptyEnrich} />
-            </div>
+            <section className="dash-card">
+              <h3>Top companies</h3>
+              <BarList data={data.topCompanies} hue={HUE.brand} empty="No company names captured yet." />
+            </section>
 
-            <div className="chart-card">
-              <h3>Data Quality — Missing Fields</h3>
+            <section className="dash-card">
+              <h3>Top cities</h3>
+              <BarList data={data.cities} hue={HUE.teal} empty={needsEnrichment} />
+            </section>
+
+            <section className="dash-card">
+              <h3>Missing fields</h3>
               <BarList
-                accent="#f59e0b"
-                emptyLabel="All fields complete."
+                hue={HUE.amber}
+                empty="Every contact has all core fields."
                 data={[
                   { label: 'Email', value: data.dataQuality.missingEmail },
                   { label: 'Mobile', value: data.dataQuality.missingMobile },
@@ -311,14 +433,37 @@ export default function AnalyticsDashboard({ projectId, projectName }) {
                   { label: 'Designation', value: data.dataQuality.missingDesignation },
                 ].filter(d => d.value > 0)}
               />
-            </div>
+            </section>
           </div>
 
-          {!data.enrichmentReady && (
-            <p className="enrich-note">
-              <i className="fas fa-circle-info"></i>
-              Industry, seniority, designation and location charts populate automatically once the AI enrichment phase is enabled.
-            </p>
+          <button type="button" className="dash-table-toggle" onClick={() => setShowTable(v => !v)} aria-expanded={showTable}>
+            <i className={`fas fa-chevron-${showTable ? 'up' : 'down'}`} />
+            {showTable ? 'Hide data table' : 'View the same data as a table'}
+          </button>
+
+          {showTable && (
+            <div className="dash-card dash-table-wrap">
+              <table className="dash-table">
+                <caption>Every chart above, as numbers.</caption>
+                <thead>
+                  <tr><th scope="col">Category</th><th scope="col">Value</th><th scope="col">Count</th></tr>
+                </thead>
+                <tbody>
+                  {[
+                    ...data.scanMethods.map(d => ['Scan method', d.label, d.value]),
+                    ...data.industries.map(d => ['Industry', d.label, d.value]),
+                    ...data.seniority.map(d => ['Seniority', d.label, d.value]),
+                    ...data.topCompanies.map(d => ['Company', d.label, d.value]),
+                    ...data.cities.map(d => ['City', d.label, d.value]),
+                    ...data.timeline.map(d => ['Captured on', d.date, d.value]),
+                  ].map(([group, label, value], i) => (
+                    <tr key={`${group}-${label}-${i}`}>
+                      <td>{group}</td><td>{label}</td><td>{fmtInt(value)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </>
       )}

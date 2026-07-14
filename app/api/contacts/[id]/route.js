@@ -7,8 +7,13 @@ import Contact from '@/models/Contact';
 import Media from '@/models/Media';
 import Project from '@/models/Project';
 import { deleteImage } from '@/lib/cloudinary';
+import { buildDedupeKeys } from '@/lib/normalize';
 
 const STRING_FIELDS = ['name', 'title', 'company', 'phone', 'mobile', 'email', 'website', 'address', 'notes'];
+
+// Editing any of these changes who the contact *is*, so the dedupe index has to
+// be rebuilt — otherwise a corrected email would still match the old one.
+const IDENTITY_FIELDS = ['name', 'company', 'phone', 'mobile', 'email', 'website'];
 
 const invalidIdResponse = () => NextResponse.json({ error: 'Invalid contact ID' }, { status: 400 });
 
@@ -62,6 +67,15 @@ export async function PUT(req, { params }) {
       return NextResponse.json({ error: 'No editable contact fields supplied' }, { status: 400 });
     }
 
+    const existing = await Contact.findOne({ _id: id, userId: session.user.id });
+    if (!existing) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
+
+    if (IDENTITY_FIELDS.some(field => Object.hasOwn(updateData, field))) {
+      const merged = { ...existing.toObject(), ...updateData };
+      Object.assign(updateData, buildDedupeKeys(merged));
+      if (Object.hasOwn(updateData, 'title')) updateData.designationRaw = updateData.title;
+    }
+
     const contact = await Contact.findOneAndUpdate(
       { _id: id, userId: session.user.id },
       updateData,
@@ -86,11 +100,17 @@ export async function DELETE(req, { params }) {
     const contact = await Contact.findOneAndDelete({ _id: id, userId: session.user.id });
     if (!contact) return NextResponse.json({ error: 'Contact not found' }, { status: 404 });
     await Media.deleteMany({ contactId: contact._id, userId: session.user.id });
-    if (contact.cardImagePublicId) {
-      await deleteImage(contact.cardImagePublicId).catch(error => {
+
+    // Every side of the card is stored in Cloudinary, so all of them have to go —
+    // deleting only the legacy `cardImagePublicId` orphaned every back image.
+    const publicIds = new Set(
+      [contact.cardImagePublicId, ...(contact.cardImages || []).map(img => img.publicId)].filter(Boolean),
+    );
+    await Promise.all(
+      Array.from(publicIds).map(publicId => deleteImage(publicId).catch((error) => {
         console.error('Contact image cleanup failed:', error);
-      });
-    }
+      })),
+    );
     return NextResponse.json({ message: 'Deleted' });
   } catch (error) {
     console.error('Contact DELETE error:', error);

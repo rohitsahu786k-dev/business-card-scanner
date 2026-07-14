@@ -5,6 +5,7 @@ import { authOptions } from '@/app/api/auth/[...nextauth]/route';
 import dbConnect from '@/lib/mongodb';
 import Contact from '@/models/Contact';
 import Project from '@/models/Project';
+import { buildDedupeKeys } from '@/lib/normalize';
 
 const STRING_FIELDS = ['name', 'title', 'company', 'phone', 'mobile', 'email', 'website', 'address', 'notes'];
 
@@ -51,6 +52,11 @@ export async function POST(req) {
     STRING_FIELDS.forEach((field) => { contactData[field] = String(data[field] || '').trim(); });
     contactData.favorite = Boolean(data.favorite);
     contactData.scanMethod = ['manual', 'import'].includes(data.scanMethod) ? data.scanMethod : 'manual';
+    contactData.designationRaw = contactData.title;
+    // Typed and imported contacts join the same dedupe index as scanned ones,
+    // so a later scan of the same person merges instead of duplicating.
+    Object.assign(contactData, buildDedupeKeys(contactData));
+    if (projectId) contactData.seenAtProjects = [projectId];
 
     const contact = await Contact.create(contactData);
     return NextResponse.json(contact, { status: 201 });

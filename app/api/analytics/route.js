@@ -187,6 +187,30 @@ export async function GET(req) {
       .map(({ companySet, ...rest }) => ({ ...rest, companies: companySet.size }))
       .sort((a, b) => b.count - a.count);
 
+    // The aggregation only emits days that had captures. Fill the gaps so the
+    // timeline is a real time axis (a quiet day reads as zero, not as absent).
+    //
+    // Buckets are UTC calendar days ($dateToString), so this walks UTC days and
+    // compares by day key rather than by instant. Comparing instants would drop
+    // the current day whenever the caller's startDate carries a local-midnight
+    // offset (e.g. a 7-day range from an IST browser starts at 18:30Z).
+    const densifyTimeline = (buckets) => {
+      if (!buckets.length) return [];
+      const counts = new Map(buckets.map(b => [b._id, b.count]));
+      const from = startDate ? new Date(startDate) : new Date(`${buckets[0]._id}T00:00:00Z`);
+      const lastKey = (endDate ? new Date(endDate) : new Date()).toISOString().slice(0, 10);
+      const day = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()));
+
+      const out = [];
+      while (out.length < 400) {
+        const key = day.toISOString().slice(0, 10);
+        out.push({ date: key, value: counts.get(key) || 0 });
+        if (key >= lastKey) break;
+        day.setUTCDate(day.getUTCDate() + 1);
+      }
+      return out;
+    };
+
     const dataQuality = {
       missingEmail: total - (t.withEmail || 0),
       missingMobile: total - (t.withMobile || 0),
@@ -212,7 +236,7 @@ export async function GET(req) {
       states: facet.states.map(s => ({ label: s._id, value: s.count })),
       cities: facet.cities.map(c => ({ label: c._id, value: c.count })),
       map: mapData,
-      timeline: facet.timeline.map(d => ({ date: d._id, value: d.count })),
+      timeline: densifyTimeline(facet.timeline),
       enrichmentReady: kpis.industriesCovered > 0 || kpis.decisionMakers > 0,
       generatedAt: new Date().toISOString(),
     });

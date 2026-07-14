@@ -13,9 +13,31 @@ import {
   compressImageDataUrl,
 } from '@/lib/qr';
 import { getCardCrop } from '@/lib/card-detection';
+import { formatInr, formatUsd } from '@/lib/config';
 
 const MAX_CONCURRENT_SCANS = 2;
-const USD_TO_INR = 84;
+
+// The scan destination is chosen once and then remembered — across tab changes,
+// reloads and sessions — until the operator explicitly changes it.
+const ACTIVE_PROJECT_KEY = 'cardscan.activeProjectId';
+const CAPTURE_MODE_KEY = 'cardscan.captureMode';
+
+const readStored = (key) => {
+  try {
+    return localStorage.getItem(key) || '';
+  } catch {
+    return ''; // Private mode / storage disabled — fall back to in-memory only.
+  }
+};
+
+const writeStored = (key, value) => {
+  try {
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch {
+    // Non-fatal: selection still holds for this session.
+  }
+};
 
 const PAGE_META = {
   dashboard: { eyebrow: 'Analytics', title: 'Dashboard', subtitle: 'Live insights across every scanned visitor.' },
@@ -58,8 +80,14 @@ export default function Dashboard() {
   const [mediaItems, setMediaItems] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Filter state
-  const [selectedProjectId, setSelectedProjectId] = useState('');
+  // The active event/project: where scans, imports and new contacts are saved,
+  // and what the dashboard reports on. Chosen once, persisted, changed on demand.
+  const [activeProjectId, setActiveProjectId] = useState('');
+  const [activeProjectReady, setActiveProjectReady] = useState(false);
+
+  // Contacts-list filters. Deliberately separate from the active event so that
+  // browsing "All contacts" never clears the scan destination.
+  const [contactScope, setContactScope] = useState('');
   const [filterFavorite, setFilterFavorite] = useState(false);
 
   // Modals state
@@ -105,14 +133,12 @@ export default function Dashboard() {
   const [qrFlash, setQrFlash] = useState(false);
   const inFlightRef = useRef(new Set());
   const projectIdRef = useRef('');
-  // Auto-selected event (Automation Expo 2026) + optional manual override.
-  const [defaultProject, setDefaultProject] = useState(null);
   const [showDestinationPicker, setShowDestinationPicker] = useState(false);
-  // Two-sided (front + back) capture flow.
-  const [twoSided, setTwoSided] = useState(false);
-  const [pendingCard, setPendingCard] = useState(null); // { contactId, name } after a front capture
+  // Capture flow: 'single' = one photo per contact, 'both' = front then back
+  // merged into the same contact.
+  const [captureMode, setCaptureMode] = useState('single');
+  const [pendingCard, setPendingCard] = useState(null); // { contactId, name, preview } after a front capture
   const [sideBusy, setSideBusy] = useState(false);
-  const twoSidedRef = useRef(false);
   const pendingCardRef = useRef(null);
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
@@ -124,17 +150,27 @@ export default function Dashboard() {
   const [mediaLocation, setMediaLocation] = useState('all');
   const [mediaDensity, setMediaDensity] = useState('standard');
 
+  // New contacts default to the active event, matching where scans land.
   const openNewContact = () => {
     setViewContact(null);
-    setEditContact(createEmptyContact(selectedProjectId));
+    setEditContact(createEmptyContact(activeProjectId));
   };
 
   const openContacts = (favoritesOnly = false) => {
     stopCamera();
     setFilterFavorite(favoritesOnly);
-    setSelectedProjectId('');
+    setContactScope('');
     setActiveTab('contacts');
     setMobileMenuOpen(false);
+  };
+
+  // The one place the active event changes. Persisting here (rather than in an
+  // effect) keeps the stored value in step with an explicit user choice only.
+  const selectActiveProject = (projectId) => {
+    setActiveProjectId(projectId);
+    writeStored(ACTIVE_PROJECT_KEY, projectId);
+    projectIdRef.current = projectId;
+    setPendingCard(null);
   };
 
   const openNavigationTab = (tab) => {
@@ -176,7 +212,7 @@ export default function Dashboard() {
   const fetchContacts = async () => {
     try {
       let url = `/api/contacts?q=${encodeURIComponent(searchQuery)}`;
-      if (selectedProjectId) url += `&projectId=${selectedProjectId}`;
+      if (contactScope) url += `&projectId=${contactScope}`;
       if (filterFavorite) url += `&favorite=true`;
 
       const res = await fetch(url);
@@ -307,7 +343,7 @@ export default function Dashboard() {
     return undefined;
     // Data functions intentionally use the current filters from this render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, searchQuery, selectedProjectId, filterFavorite, activeTab]);
+  }, [session, searchQuery, contactScope, filterFavorite, activeTab]);
 
   const showToast = (message, type = 'success') => {
     setToast(previous => ({ message, type, id: (previous.id || 0) + 1 }));
@@ -376,7 +412,7 @@ export default function Dashboard() {
         phase: 'ready',
         message: projectIdRef.current
           ? 'Camera ready. Frame the card, then tap Capture.'
-          : 'Camera ready. Select a project or exhibition to start saving contacts.',
+          : 'Camera ready. Choose where to save contacts to start scanning.',
       });
     } catch (err) {
       console.error('Camera access failed:', err);
@@ -510,8 +546,9 @@ export default function Dashboard() {
   const captureForBackground = () => {
     if (captureLockRef.current) return;
     if (!projectIdRef.current) {
-      setScanFeedback({ phase: 'error', message: 'Select a project or exhibition before scanning.' });
-      showToast('Select a project or exhibition before scanning.', 'error');
+      setScanFeedback({ phase: 'error', message: 'Choose where to save contacts before scanning.' });
+      showToast('Choose where to save contacts before scanning.', 'error');
+      setShowDestinationPicker(true);
       return;
     }
     const frame = grabVideoFrame();
@@ -531,13 +568,15 @@ export default function Dashboard() {
     showToast('Photo captured. Details are being extracted in the background.', 'success');
   };
 
-  // Two-sided capture (Section 5). Front is saved first; the returned contact id
-  // is reused so the back merges into the SAME contact instead of a new record.
+  // Two-sided capture. The front is saved first; the contact id it returns is
+  // passed back with the second photo so the back merges into the SAME contact
+  // rather than creating a second record.
   const captureSide = async () => {
     if (sideBusy || captureLockRef.current) return;
     if (!projectIdRef.current) {
-      setScanFeedback({ phase: 'error', message: 'Automation Expo 2026 could not be loaded. Please refresh.' });
-      showToast('No destination selected. Please refresh.', 'error');
+      setScanFeedback({ phase: 'error', message: 'Choose where to save contacts before scanning.' });
+      showToast('Choose where to save contacts before scanning.', 'error');
+      setShowDestinationPicker(true);
       return;
     }
     const frame = grabVideoFrame();
@@ -581,10 +620,10 @@ export default function Dashboard() {
       fetchProjects();
 
       if (side === 'front') {
-        setPendingCard({ contactId: data.contact._id, name: data.contact.name });
+        setPendingCard({ contactId: data.contact._id, name: data.contact.name, preview: frame });
         if (!data.duplicate) triggerEnrich(data.contact?._id);
-        setScanFeedback({ phase: 'saved', message: 'Front captured successfully. Flip the card and capture the back — or Save Front Only.' });
-        showToast(data.duplicate ? 'This contact already exists. No duplicate was created.' : 'Front captured successfully.', 'success');
+        setScanFeedback({ phase: 'saved', message: 'Front saved. Now flip the card over and capture the back.' });
+        showToast(data.duplicate ? 'This contact already exists. No duplicate was created.' : 'Front saved. Flip the card over.', 'success');
       } else {
         setPendingCard(null);
         setScanFeedback({ phase: 'saved', message: 'Front and back saved to one contact. Show the next card.' });
@@ -598,38 +637,81 @@ export default function Dashboard() {
     }
   };
 
-  const saveFrontOnly = () => {
+  // The front is already a saved contact — "done" just ends the two-sided pair.
+  const finishWithFrontOnly = () => {
     setPendingCard(null);
-    setScanFeedback({ phase: 'saved', message: 'Saved front only. Show the next card.' });
+    setScanFeedback({ phase: 'saved', message: 'Saved with the front only. Show the next card.' });
     showToast('Saved — front only.', 'success');
   };
 
-  // Keep a ref of the selected project for the background queue workers
-  useEffect(() => { projectIdRef.current = selectedProjectId; }, [selectedProjectId]);
-  useEffect(() => { twoSidedRef.current = twoSided; }, [twoSided]);
+  // Keep refs in step for the background queue workers and capture handlers,
+  // which read them outside of React's render cycle.
+  useEffect(() => { projectIdRef.current = activeProjectId; }, [activeProjectId]);
   useEffect(() => { pendingCardRef.current = pendingCard; }, [pendingCard]);
 
-  // Provision + auto-select the default event (Automation Expo 2026) so the
-  // operator never picks a project. Runs once the session is ready.
+  // Restore the remembered capture mode after mount — reading localStorage during
+  // render would disagree with the server-rendered markup.
   useEffect(() => {
-    if (!session) return;
+    const stored = readStored(CAPTURE_MODE_KEY);
+    if (stored !== 'single' && stored !== 'both') return undefined;
+    const frame = requestAnimationFrame(() => setCaptureMode(stored));
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  const selectCaptureMode = (mode) => {
+    setCaptureMode(mode);
+    writeStored(CAPTURE_MODE_KEY, mode);
+    setPendingCard(null);
+  };
+
+  // Restore the remembered destination once, when the session is ready.
+  //
+  // Resolution order: the project the operator last chose → the account's default
+  // event (seeded on first call) → nothing, which surfaces the picker. A stored id
+  // for a project that has since been deleted is discarded rather than used, so a
+  // stale localStorage value can never send scans into a missing project.
+  useEffect(() => {
+    if (!session || activeProjectReady) return undefined;
     let cancelled = false;
+
     (async () => {
+      const stored = readStored(ACTIVE_PROJECT_KEY);
       try {
-        const res = await fetch('/api/projects/default');
-        if (!res.ok) return;
-        const project = await res.json();
-        if (cancelled || !project?._id) return;
-        setDefaultProject(project);
-        setProjects(prev => (prev.some(p => p._id === project._id) ? prev : [project, ...prev]));
-        setSelectedProjectId(prev => prev || project._id);
+        const [listRes, defaultRes] = await Promise.all([
+          fetch('/api/projects'),
+          fetch('/api/projects/default'),
+        ]);
+        if (cancelled) return;
+
+        const list = listRes.ok ? await listRes.json() : [];
+        const fallback = defaultRes.ok ? await defaultRes.json() : null;
+        const known = new Set(list.map(p => p._id));
+        if (fallback?._id) known.add(fallback._id);
+
+        const resolved = (stored && known.has(stored) && stored) || fallback?._id || '';
+        if (resolved !== stored) writeStored(ACTIVE_PROJECT_KEY, resolved);
+
+        setProjects(prev => {
+          const merged = list.length ? list : prev;
+          if (fallback?._id && !merged.some(p => p._id === fallback._id)) return [fallback, ...merged];
+          return merged;
+        });
+        setActiveProjectId(resolved);
+        projectIdRef.current = resolved;
       } catch {
-        // Non-fatal: the manual picker remains available as a fallback.
+        // Offline or provisioning failed: keep whatever was stored so an operator
+        // who is mid-event can carry on scanning into the same project.
+        if (!cancelled && stored) {
+          setActiveProjectId(stored);
+          projectIdRef.current = stored;
+        }
+      } finally {
+        if (!cancelled) setActiveProjectReady(true);
       }
     })();
+
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session]);
+  }, [session, activeProjectReady]);
 
   useEffect(() => {
     if (activeTab === 'scan') {
@@ -698,6 +780,13 @@ export default function Dashboard() {
 
   const handleExtractCard = () => {
     if (!scanPreview) return;
+    // Without a destination the queue would save the contact unorganized, which
+    // is never what the operator meant on the scan screen.
+    if (!activeProjectId) {
+      showToast('Choose where to save contacts before scanning.', 'error');
+      setShowDestinationPicker(true);
+      return;
+    }
     setScanning(true);
     enqueueScans([{ preview: scanPreview, source: 'upload' }]);
     setScanPreview(null);
@@ -707,8 +796,9 @@ export default function Dashboard() {
   const handleBulkFileSelect = (e) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
-    if (!selectedProjectId) {
-      showToast('Select a project or exhibition before uploading cards.', 'error');
+    if (!activeProjectId) {
+      showToast('Choose where to save contacts before uploading cards.', 'error');
+      setShowDestinationPicker(true);
       e.target.value = '';
       return;
     }
@@ -720,67 +810,24 @@ export default function Dashboard() {
     e.target.value = '';
   };
 
+  // Exports the active event's contacts (the scanner's "Export CSV" action).
   const handleDownloadBulkCSV = () => {
-    if (!selectedProjectId) {
-      showToast('Select a project or exhibition to download its CSV.', 'error');
+    if (!activeProjectId) {
+      showToast('Choose an event before downloading its CSV.', 'error');
+      setShowDestinationPicker(true);
       return;
     }
-    window.open(`/api/export?format=csv&projectId=${encodeURIComponent(selectedProjectId)}`, '_blank');
+    window.open(`/api/export?format=csv&projectId=${encodeURIComponent(activeProjectId)}`, '_blank');
   };
 
   const handleDownloadProjectCSV = (projectId) => {
     window.open(`/api/export?format=csv&projectId=${encodeURIComponent(projectId)}`, '_blank');
   };
 
-  /* Removed single-shot review flow; unified scanner auto-saves instead.
-  // Single scan: QR-first extract, auto-saved to DB + Media on the server,
-  // then opened in the edit modal for review.
-  const handleExtractCard = async () => {
-    if (!scanPreview) return;
-    setScanning(true);
-    try {
-      let qrFields = null;
-      const qrText = await decodeQrFromDataUrl(scanPreview);
-      if (qrText) {
-        const parsed = parseQrText(qrText);
-        if (isMeaningfulQrContact(parsed)) qrFields = { ...parsed.fields, notes: `Scanned via QR code (${parsed.kind})` };
-      }
-      const image = await compressImageDataUrl(scanPreview);
-      const res = await fetch('/api/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image, qr: qrFields, projectId: selectedProjectId || null, autoSave: true }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to extract card details');
-
-      setScanning(false);
-      setScanPreview(null);
-      setSessionStats(prev => ({
-        count: prev.count + 1,
-        qr: prev.qr + (data.method === 'qr' ? 1 : 0),
-        ai: prev.ai + (data.method === 'ai' ? 1 : 0),
-        costUsd: prev.costUsd + (data.costUsd || 0),
-      }));
-      setEditContact(data.contact);
-      fetchContacts();
-      fetchMedia();
-      fetchProjects();
-      showToast(data.method === 'qr' ? 'QR contact saved — FREE scan!' : `Card saved! AI cost $${(data.costUsd || 0).toFixed(4)}`, 'success');
-    } catch (err) {
-      setScanning(false);
-      showToast(err.message, 'error');
-    }
-  };
-
-  */
-  const formatCost = (usd) => {
-    if (!usd) return 'FREE';
-    return `$${usd.toFixed(4)} (~₹${(usd * USD_TO_INR).toFixed(2)})`;
-  };
+  const formatCost = (usd) => (usd ? `${formatUsd(usd)} (≈ ${formatInr(usd)})` : 'FREE');
 
   const pendingScans = bulkQueue.filter(i => i.status === 'queued' || i.status === 'processing').length;
-  const selectedDestination = projects.find(project => project._id === selectedProjectId) || null;
+  const activeProject = projects.find(project => project._id === activeProjectId) || null;
 
   // Compact one-line event summary for the read-only scanner badge, e.g.
   // "22–25 Jul 2026 · Hall 6 · Mumbai". Falls back gracefully for plain projects.
@@ -855,7 +902,7 @@ export default function Dashboard() {
         <div className="session-stat"><strong>{sessionStats.count}</strong><span>Scans</span></div>
         <div className="session-stat free"><strong>{sessionStats.qr}</strong><span>QR (Free)</span></div>
         <div className="session-stat"><strong>{sessionStats.ai}</strong><span>AI Scans</span></div>
-        <div className="session-stat cost"><strong>{sessionStats.costUsd ? `$${sessionStats.costUsd.toFixed(4)}` : '$0'}</strong><span>≈ ₹{(sessionStats.costUsd * USD_TO_INR).toFixed(2)} total</span></div>
+        <div className="session-stat cost"><strong>{formatUsd(sessionStats.costUsd)}</strong><span>≈ {formatInr(sessionStats.costUsd)} total</span></div>
       </div>
     );
   };
@@ -939,8 +986,13 @@ export default function Dashboard() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to save project');
 
-      setSelectedProjectId(data._id);
-      setScanFeedback({ phase: 'ready', message: `${data.name} selected. Ready to scan contacts.` });
+      // A newly created destination becomes the active one — that is why the
+      // operator made it. Editing an existing one leaves the selection alone.
+      if (isNew) {
+        selectActiveProject(data._id);
+        setShowDestinationPicker(false);
+        setScanFeedback({ phase: 'ready', message: `${data.name} selected. Ready to scan contacts.` });
+      }
       showToast(isNew ? `${data.type === 'exhibition' ? 'Exhibition' : 'Project'} created and selected!` : 'Project / exhibition updated!', 'success');
       setProjectModal(null);
       fetchProjects();
@@ -956,7 +1008,9 @@ export default function Dashboard() {
       if (res.ok) {
         showToast('Project deleted', 'success');
         setProjectModal(null);
-        if (selectedProjectId === id) setSelectedProjectId('');
+        // Deleting the active event must not leave scans pointing at it.
+        if (activeProjectId === id) selectActiveProject('');
+        if (contactScope === id) setContactScope('');
         fetchProjects();
         fetchContacts();
       } else {
@@ -1066,9 +1120,11 @@ export default function Dashboard() {
   };
 
   // ---------------- EXPORTS & IMPORTS ----------------
+  // Exports what the contacts list is currently showing, so what you see is what
+  // you download.
   const handleExport = (format) => {
     let url = `/api/export?format=${format}`;
-    if (selectedProjectId) url += `&projectId=${selectedProjectId}`;
+    if (contactScope) url += `&projectId=${contactScope}`;
     window.open(url, '_blank');
     setToolsModalOpen(false);
     showToast(`Exported as ${format.toUpperCase()}`, 'success');
@@ -1123,7 +1179,7 @@ export default function Dashboard() {
               address: item.address || '',
               notes: item.notes || 'Imported file',
               scanMethod: 'import',
-              projectId: selectedProjectId || null
+              projectId: activeProjectId || null
             })
           });
           if (res.ok) importedCount++;
@@ -1404,7 +1460,7 @@ export default function Dashboard() {
             <>
               {/* ============ DASHBOARD TAB ============ */}
               {activeTab === 'dashboard' && (
-                <AnalyticsDashboard key={selectedProjectId} projectId={selectedProjectId} projectName={selectedDestination?.name} />
+                <AnalyticsDashboard key={activeProjectId} projectId={activeProjectId} projectName={activeProject?.name} />
               )}
 
               {/* ============ CONTACTS TAB ============ */}
@@ -1424,39 +1480,25 @@ export default function Dashboard() {
                       </button>
                     </div>
                   </div>
-                  {selectedProjectId && (
-                    <button className="context-back" onClick={() => { setSelectedProjectId(''); setActiveTab('projects'); }}>
-                      <i className="fas fa-arrow-left"></i>
-                      Back to Projects
-                    </button>
-                  )}
-                  {/* Project Selector pill row */}
-                  <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '16px', marginBottom: '8px' }}>
+                  {/* Filters the list only — it never changes where scans are
+                      saved, so browsing here cannot lose the active event. */}
+                  <div className="scope-chips" role="group" aria-label="Filter contacts by project">
                     <button
-                      className={`btn-outline ${!selectedProjectId ? 'active' : ''}`}
-                      onClick={() => setSelectedProjectId('')}
-                      style={{
-                        background: !selectedProjectId ? 'var(--red-light)' : '#fff',
-                        borderColor: !selectedProjectId ? 'var(--red)' : '',
-                        color: !selectedProjectId ? 'var(--red)' : '',
-                        whiteSpace: 'nowrap'
-                      }}
+                      type="button"
+                      className={`scope-chip ${!contactScope ? 'active' : ''}`}
+                      onClick={() => setContactScope('')}
                     >
-                      All Contacts
+                      All contacts
                     </button>
                     {projects.map(p => (
                       <button
+                        type="button"
                         key={p._id}
-                        className={`btn-outline ${selectedProjectId === p._id ? 'active' : ''}`}
-                        onClick={() => setSelectedProjectId(p._id)}
-                        style={{
-                          background: selectedProjectId === p._id ? 'var(--red-light)' : '#fff',
-                          borderColor: selectedProjectId === p._id ? 'var(--red)' : '',
-                          color: selectedProjectId === p._id ? 'var(--red)' : '',
-                          whiteSpace: 'nowrap'
-                        }}
+                        className={`scope-chip ${contactScope === p._id ? 'active' : ''}`}
+                        onClick={() => setContactScope(p._id)}
                       >
                         {p.name}
+                        {p._id === activeProjectId && <span className="scope-chip-dot" title="Active event" aria-label="Active event" />}
                       </button>
                     ))}
                   </div>
@@ -1573,167 +1615,80 @@ export default function Dashboard() {
                     </div>
 
                     {/* Media Controls Toolbar */}
-                    <div className="media-toolbar" style={{
-                      display: 'flex',
-                      flexWrap: 'wrap',
-                      gap: '12px',
-                      alignItems: 'center',
-                      marginBottom: '20px',
-                      background: '#f8fafc',
-                      padding: '12px',
-                      borderRadius: '12px',
-                      border: '1px solid var(--border)'
-                    }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: '1 1 200px' }}>
-                        <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)', whiteSpace: 'nowrap' }}>Search:</label>
-                        <div className="input-wrap" style={{ margin: 0, width: '100%', position: 'relative' }}>
-                          <i className="fas fa-search field-icon" style={{ left: '12px', position: 'absolute', top: '50%', transform: 'translateY(-50%)', color: 'var(--text3)' }}></i>
-                          <input
-                            type="text"
-                            placeholder="Search media files..."
-                            value={mediaSearchQuery}
-                            onChange={(e) => setMediaSearchQuery(e.target.value)}
-                            style={{ paddingLeft: '32px', height: '36px', fontSize: '13px', borderRadius: '8px', border: '1px solid var(--border)', width: '100%', outline: 'none' }}
-                          />
-                        </div>
+                    <div className="media-toolbar">
+                      <div className="media-search">
+                        <i className="fas fa-search" aria-hidden="true"></i>
+                        <input
+                          type="search"
+                          aria-label="Search media files"
+                          placeholder="Search media files..."
+                          value={mediaSearchQuery}
+                          onChange={(e) => setMediaSearchQuery(e.target.value)}
+                        />
                       </div>
 
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', alignItems: 'center', flex: '999 1 auto', justifyContent: 'flex-end' }}>
-                        {/* Link Filter */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)' }}>Filter:</label>
-                          <select
-                            value={mediaFilter}
-                            onChange={(e) => setMediaFilter(e.target.value)}
-                            style={{ height: '36px', padding: '0 10px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '13px', background: '#fff', cursor: 'pointer', outline: 'none' }}
-                          >
-                            <option value="all">All Assets</option>
-                            <option value="linked">Linked Only</option>
-                            <option value="unlinked">Unlinked Only</option>
+                      <div className="media-filters">
+                        <label className="media-field">
+                          <span>Show</span>
+                          <select value={mediaFilter} onChange={(e) => setMediaFilter(e.target.value)}>
+                            <option value="all">All assets</option>
+                            <option value="linked">Linked only</option>
+                            <option value="unlinked">Unlinked only</option>
                           </select>
-                        </div>
-
-                        {/* Industry Filter */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)' }}>Industry:</label>
-                          <select
-                            value={mediaIndustry}
-                            onChange={(e) => setMediaIndustry(e.target.value)}
-                            style={{ height: '36px', padding: '0 10px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '13px', background: '#fff', cursor: 'pointer', outline: 'none' }}
-                          >
-                            <option value="all">All Industries</option>
+                        </label>
+                        <label className="media-field">
+                          <span>Industry</span>
+                          <select value={mediaIndustry} onChange={(e) => setMediaIndustry(e.target.value)}>
+                            <option value="all">All industries</option>
                             {industryOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                           </select>
-                        </div>
-
-                        {/* Designation Filter */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)' }}>Designation:</label>
-                          <select
-                            value={mediaDesignation}
-                            onChange={(e) => setMediaDesignation(e.target.value)}
-                            style={{ height: '36px', padding: '0 10px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '13px', background: '#fff', cursor: 'pointer', outline: 'none' }}
-                          >
-                            <option value="all">All Designations</option>
+                        </label>
+                        <label className="media-field">
+                          <span>Designation</span>
+                          <select value={mediaDesignation} onChange={(e) => setMediaDesignation(e.target.value)}>
+                            <option value="all">All designations</option>
                             {designationOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                           </select>
-                        </div>
-
-                        {/* Location Filter */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)' }}>Location:</label>
-                          <select
-                            value={mediaLocation}
-                            onChange={(e) => setMediaLocation(e.target.value)}
-                            style={{ height: '36px', padding: '0 10px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '13px', background: '#fff', cursor: 'pointer', outline: 'none' }}
-                          >
-                            <option value="all">All Locations</option>
+                        </label>
+                        <label className="media-field">
+                          <span>Location</span>
+                          <select value={mediaLocation} onChange={(e) => setMediaLocation(e.target.value)}>
+                            <option value="all">All locations</option>
                             {locationOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                           </select>
-                        </div>
-
-                        {/* Sort Selector */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)' }}>Sort:</label>
-                          <select
-                            value={mediaSort}
-                            onChange={(e) => setMediaSort(e.target.value)}
-                            style={{ height: '36px', padding: '0 10px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '13px', background: '#fff', cursor: 'pointer', outline: 'none' }}
-                          >
-                            <option value="newest">Newest First</option>
-                            <option value="oldest">Oldest First</option>
-                            <option value="title">Name (A-Z)</option>
-                            <option value="size">File Size</option>
+                        </label>
+                        <label className="media-field">
+                          <span>Sort</span>
+                          <select value={mediaSort} onChange={(e) => setMediaSort(e.target.value)}>
+                            <option value="newest">Newest first</option>
+                            <option value="oldest">Oldest first</option>
+                            <option value="title">Name (A–Z)</option>
+                            <option value="size">File size</option>
                           </select>
-                        </div>
+                        </label>
 
-                        {/* Layout Density */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <label style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text2)' }}>View:</label>
-                          <div style={{ display: 'flex', background: '#e2e8f0', padding: '3px', borderRadius: '8px', gap: '2px' }}>
+                        <div className="media-density" role="group" aria-label="Gallery layout">
+                          {[
+                            { id: 'standard', icon: 'fa-table-cells-large', label: 'Standard grid' },
+                            { id: 'compact', icon: 'fa-table-cells', label: 'Compact grid' },
+                            { id: 'list', icon: 'fa-list', label: 'List view' },
+                          ].map(option => (
                             <button
                               type="button"
-                              onClick={() => setMediaDensity('standard')}
-                              style={{
-                                border: 'none',
-                                background: mediaDensity === 'standard' ? '#fff' : 'transparent',
-                                color: mediaDensity === 'standard' ? 'var(--red)' : '#64748b',
-                                padding: '6px 10px',
-                                borderRadius: '6px',
-                                cursor: 'pointer',
-                                fontSize: '12px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '4px',
-                                fontWeight: mediaDensity === 'standard' ? '600' : '400'
-                              }}
-                              title="Standard Grid"
+                              key={option.id}
+                              className={mediaDensity === option.id ? 'active' : ''}
+                              onClick={() => setMediaDensity(option.id)}
+                              title={option.label}
+                              aria-label={option.label}
+                              aria-pressed={mediaDensity === option.id}
                             >
-                              <i className="fas fa-th-large"></i>
+                              <i className={`fas ${option.icon}`}></i>
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => setMediaDensity('compact')}
-                              style={{
-                                border: 'none',
-                                background: mediaDensity === 'compact' ? '#fff' : 'transparent',
-                                color: mediaDensity === 'compact' ? 'var(--red)' : '#64748b',
-                                padding: '6px 10px',
-                                borderRadius: '6px',
-                                cursor: 'pointer',
-                                fontSize: '12px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '4px',
-                                fontWeight: mediaDensity === 'compact' ? '600' : '400'
-                              }}
-                              title="Compact Grid"
-                            >
-                              <i className="fas fa-th"></i>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setMediaDensity('list')}
-                              style={{
-                                border: 'none',
-                                background: mediaDensity === 'list' ? '#fff' : 'transparent',
-                                color: mediaDensity === 'list' ? 'var(--red)' : '#64748b',
-                                padding: '6px 10px',
-                                borderRadius: '6px',
-                                cursor: 'pointer',
-                                fontSize: '12px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '4px',
-                                fontWeight: mediaDensity === 'list' ? '600' : '400'
-                              }}
-                              title="List View"
-                            >
-                              <i className="fas fa-list"></i>
-                            </button>
-                          </div>
+                          ))}
                         </div>
                       </div>
+
+                      <p className="media-count">{items.length} of {mediaItems.length} assets</p>
                     </div>
 
                     {items.length === 0 ? (
@@ -1810,11 +1765,28 @@ export default function Dashboard() {
                   ) : (
                     <div className="project-grid">
                       {projects.map(p => (
-                        <div key={p._id} className="project-card" style={{ borderColor: 'var(--border)' }} onClick={() => { setSelectedProjectId(p._id); setActiveTab('contacts'); }}>
+                        <div
+                          key={p._id}
+                          className={`project-card ${p._id === activeProjectId ? 'is-active' : ''}`}
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Open contacts in ${p.name}`}
+                          onClick={() => { setContactScope(p._id); setActiveTab('contacts'); }}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              setContactScope(p._id);
+                              setActiveTab('contacts');
+                            }
+                          }}
+                        >
                           <span className={`project-type-badge ${p.type || 'project'}`}>
                             <i className={`fas ${p.type === 'exhibition' ? 'fa-building-columns' : 'fa-folder'}`}></i>
                             {p.type === 'exhibition' ? 'Exhibition' : 'Project'}
                           </span>
+                          {p._id === activeProjectId && (
+                            <span className="project-active-badge"><i className="fas fa-circle-check"></i> Scanning into this</span>
+                          )}
                           <h3>{p.name}</h3>
                           <p>{p.description || 'No description provided'}</p>
                           {(p.eventDate || p.location) && (
@@ -1826,14 +1798,23 @@ export default function Dashboard() {
                           <span className="project-count">
                             <i className="fas fa-user-friends"></i> {p.contactCount || 0} Contacts
                           </span>
-                          <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '14px' }} onClick={e => e.stopPropagation()}>
-                            <button className="icon-btn project-csv-btn" onClick={() => handleDownloadProjectCSV(p._id)} title={`Export ${p.name} contacts as CSV`} aria-label={`Export ${p.name} as CSV`} style={{ width: '34px', height: '30px', fontSize: '12px' }}>
+                          <div className="project-card-actions" onClick={e => e.stopPropagation()}>
+                            {p._id !== activeProjectId && (
+                              <button
+                                type="button"
+                                className="btn-outline project-activate-btn"
+                                onClick={() => { selectActiveProject(p._id); showToast(`Scans will now be saved to ${p.name}.`, 'success'); }}
+                              >
+                                <i className="fas fa-crosshairs"></i> Scan into this
+                              </button>
+                            )}
+                            <button type="button" className="icon-btn project-csv-btn" onClick={() => handleDownloadProjectCSV(p._id)} title={`Export ${p.name} contacts as CSV`} aria-label={`Export ${p.name} as CSV`}>
                               <i className="fas fa-file-csv"></i>
                             </button>
-                            <button className="icon-btn" onClick={() => setProjectModal(p)} aria-label={`Edit ${p.name}`} style={{ width: '30px', height: '30px', fontSize: '12px' }}>
+                            <button type="button" className="icon-btn" onClick={() => setProjectModal(p)} aria-label={`Edit ${p.name}`}>
                               <i className="fas fa-pen"></i>
                             </button>
-                            <button className="icon-btn" onClick={() => handleDeleteProject(p._id)} aria-label={`Delete ${p.name}`} style={{ width: '30px', height: '30px', fontSize: '12px', color: 'var(--red)' }}>
+                            <button type="button" className="icon-btn icon-btn-danger" onClick={() => handleDeleteProject(p._id)} aria-label={`Delete ${p.name}`}>
                               <i className="fas fa-trash-can"></i>
                             </button>
                           </div>
@@ -1872,16 +1853,17 @@ export default function Dashboard() {
                     </button>
                   </div>
 
-                  {/* Read-only event context — the destination is auto-selected
-                      (Automation Expo 2026); operators never pick a project. */}
-                  <section className={`scan-destination-panel ${selectedDestination ? 'selected' : 'required'}`}>
-                    {selectedDestination ? (
+                  {/* The destination is chosen once and then stays put. It is shown
+                      read-only here; "Change" reveals the picker on demand. */}
+                  <section className={`scan-destination-panel ${activeProject ? 'selected' : 'required'}`}>
+                    {activeProject ? (
                       <div className="event-context-badge">
                         <div className="event-context-main">
                           <span className="event-context-dot" aria-hidden="true"></span>
                           <div>
-                            <strong>{selectedDestination.name}</strong>
-                            <span>{formatEventContext(selectedDestination)}</span>
+                            <small>Saving contacts to</small>
+                            <strong>{activeProject.name}</strong>
+                            <span>{formatEventContext(activeProject)}</span>
                           </div>
                         </div>
                         <div className="event-context-actions">
@@ -1899,17 +1881,23 @@ export default function Dashboard() {
                       </div>
                     ) : (
                       <div className="destination-required-message">
-                        <i className="fas fa-circle-info"></i> Loading Automation Expo 2026…
+                        <i className={`fas ${activeProjectReady ? 'fa-circle-exclamation' : 'fa-spinner fa-spin'}`}></i>
+                        {activeProjectReady
+                          ? 'Choose where to save contacts. Your choice is remembered for next time.'
+                          : 'Loading your events…'}
                       </div>
                     )}
-                    {(showDestinationPicker || !selectedDestination) && (
+                    {(showDestinationPicker || (activeProjectReady && !activeProject)) && (
                       <div className="destination-picker">
                         <select
-                          aria-label="Select project or exhibition"
-                          value={selectedProjectId}
+                          aria-label="Choose where scanned contacts are saved"
+                          value={activeProjectId}
                           onChange={(event) => {
-                            setSelectedProjectId(event.target.value);
-                            if (event.target.value) setScanFeedback({ phase: 'ready', message: 'Destination selected. Frame the card, then tap Capture.' });
+                            selectActiveProject(event.target.value);
+                            if (event.target.value) {
+                              setShowDestinationPicker(false);
+                              setScanFeedback({ phase: 'ready', message: 'Destination saved. Frame the card, then tap Capture.' });
+                            }
                           }}
                         >
                           <option value="">Choose a project / exhibition...</option>
@@ -1984,57 +1972,87 @@ export default function Dashboard() {
                         <span>{scanFeedback.message}</span>
                       </div>
 
-                      <label className="two-sided-toggle">
-                        <input
-                          type="checkbox"
-                          checked={twoSided}
-                          onChange={(e) => { setTwoSided(e.target.checked); setPendingCard(null); }}
-                        />
-                        <span><i className="fas fa-clone"></i> Two-sided card (front + back)</span>
-                      </label>
+                      {/* How many photos make one contact. Remembered between
+                          sessions, so a two-sided event never has to be re-armed. */}
+                      <div className="capture-mode" role="group" aria-label="Capture mode">
+                        <button
+                          type="button"
+                          className={captureMode === 'single' ? 'active' : ''}
+                          onClick={() => selectCaptureMode('single')}
+                        >
+                          <i className="fas fa-id-card"></i>
+                          <span>One side<small>Front only</small></span>
+                        </button>
+                        <button
+                          type="button"
+                          className={captureMode === 'both' ? 'active' : ''}
+                          onClick={() => selectCaptureMode('both')}
+                        >
+                          <i className="fas fa-clone"></i>
+                          <span>Front + back<small>Two photos, one contact</small></span>
+                        </button>
+                      </div>
 
-                      {twoSided && pendingCard && (
-                        <div className="side-prompt" aria-live="polite">
-                          <div>
-                            <strong><i className="fas fa-check-circle"></i> Front captured{pendingCard.name ? `: ${pendingCard.name}` : ''}</strong>
-                            <span>Flip the card and capture the back — or save the front only.</span>
+                      {captureMode === 'both' && (
+                        <div className="side-steps" aria-live="polite">
+                          <div className={`side-step ${pendingCard ? 'done' : 'current'}`}>
+                            <span className="side-step-num">
+                              {pendingCard ? <i className="fas fa-check"></i> : '1'}
+                            </span>
+                            {pendingCard?.preview
+                              ? <img src={pendingCard.preview} alt="Captured front of the card" className="side-step-thumb" />
+                              : <span className="side-step-thumb placeholder"><i className="fas fa-camera"></i></span>}
+                            <div className="side-step-copy">
+                              <strong>Front</strong>
+                              <small>{pendingCard ? (pendingCard.name || 'Saved') : 'Capture the front'}</small>
+                            </div>
                           </div>
-                          <button type="button" className="btn-outline" onClick={saveFrontOnly} disabled={sideBusy}>
-                            Save Front Only
-                          </button>
+                          <i className="fas fa-arrow-right side-step-arrow" aria-hidden="true"></i>
+                          <div className={`side-step ${pendingCard ? 'current' : ''}`}>
+                            <span className="side-step-num">2</span>
+                            <span className="side-step-thumb placeholder"><i className="fas fa-rotate"></i></span>
+                            <div className="side-step-copy">
+                              <strong>Back</strong>
+                              <small>{pendingCard ? 'Flip the card, then capture' : 'After the front'}</small>
+                            </div>
+                          </div>
+                          {pendingCard && (
+                            <button type="button" className="side-skip" onClick={finishWithFrontOnly} disabled={sideBusy}>
+                              Skip back
+                            </button>
+                          )}
                         </div>
                       )}
 
                       <div className="rapid-controls">
-                          <button className="rapid-side-btn" onClick={triggerBulkUpload} title="Pick from gallery">
-                            <i className="fas fa-images"></i>
-                            <span>Gallery</span>
-                          </button>
-                          {twoSided ? (
-                            <button
-                              className="btn-capture"
-                              onClick={captureSide}
-                              title={pendingCard ? 'Capture back side' : 'Capture front side'}
-                              aria-label={pendingCard ? 'Capture back side' : 'Capture front side'}
-                              disabled={!cameraActive || sideBusy}
-                            >
-                              <i className={`fas ${sideBusy ? 'fa-spinner fa-spin' : 'fa-camera'}`}></i>
-                              <small className="capture-side-label">{pendingCard ? 'Back' : 'Front'}</small>
-                            </button>
-                          ) : (
-                            <button className="btn-capture" onClick={() => captureForBackground()} title="Capture card" aria-label="Capture card" disabled={!cameraActive}>
-                              <i className="fas fa-camera"></i>
-                            </button>
+                        <button type="button" className="rapid-side-btn" onClick={triggerBulkUpload} title="Pick from gallery">
+                          <i className="fas fa-images"></i>
+                          <span>Gallery</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={`btn-capture ${captureMode === 'both' ? (pendingCard ? 'side-back' : 'side-front') : ''}`}
+                          onClick={() => (captureMode === 'both' ? captureSide() : captureForBackground())}
+                          title={captureMode === 'both' ? (pendingCard ? 'Capture the back' : 'Capture the front') : 'Capture card'}
+                          aria-label={captureMode === 'both' ? (pendingCard ? 'Capture the back' : 'Capture the front') : 'Capture card'}
+                          disabled={!cameraActive || sideBusy}
+                        >
+                          <i className={`fas ${sideBusy ? 'fa-spinner fa-spin' : 'fa-camera'}`}></i>
+                          {captureMode === 'both' && (
+                            <small className="capture-side-label">{pendingCard ? 'Back' : 'Front'}</small>
                           )}
-                          <button className="rapid-side-btn" onClick={handleDownloadBulkCSV} title="Download all contacts as CSV">
-                            <i className="fas fa-file-csv"></i>
-                            <span>CSV</span>
-                          </button>
+                        </button>
+                        <button type="button" className="rapid-side-btn" onClick={handleDownloadBulkCSV} title="Download this event's contacts as CSV">
+                          <i className="fas fa-file-csv"></i>
+                          <span>CSV</span>
+                        </button>
                       </div>
 
                       <p className="rapid-hint">
                         <i className="fas fa-hand-pointer"></i>
-                        Place one <strong>QR code or visiting card</strong> inside the guide and tap the Capture camera button in the bottom dock. The photo is queued and its details are extracted in the background.
+                        {captureMode === 'both'
+                          ? 'Capture the front, flip the card, capture the back — both photos are saved to the same contact.'
+                          : 'Place a QR code or visiting card inside the guide and tap Capture. Details are extracted in the background.'}
                       </p>
                     </div>
                   ) : scanMode === 'single' ? (
@@ -2342,9 +2360,61 @@ export default function Dashboard() {
                 )}
               </div>
 
-              {viewContact.cardImage && (
-                <div style={{ marginBottom: '20px', borderRadius: 'var(--radius-sm)', overflow: 'hidden', border: '1px solid var(--border)' }}>
-                  <img src={viewContact.cardImage} alt="Card preview" style={{ width: '100%', display: 'block', maxHeight: '200px', objectFit: 'contain', background: '#f1f5f9' }} />
+              {(() => {
+                // Prefer the structured front/back entries; fall back to the
+                // legacy single image for contacts scanned before two-sided capture.
+                const shots = (viewContact.cardImages || []).filter(img => img.url);
+                const images = shots.length
+                  ? shots
+                  : (viewContact.cardImage ? [{ side: 'front', url: viewContact.cardImage }] : []);
+                if (!images.length) return null;
+                return (
+                  <div className="card-shots">
+                    {images.map((img) => (
+                      <button
+                        type="button"
+                        key={img.url}
+                        className="card-shot"
+                        onClick={() => setViewLightbox({ url: img.url, title: `${viewContact.name} — ${img.side || 'card'}` })}
+                        aria-label={`View the ${img.side || 'card'} image full size`}
+                      >
+                        <img src={img.url} alt={`${img.side || 'Card'} of ${viewContact.name}'s business card`} />
+                        <span className={`card-shot-side ${img.side || 'front'}`}>{img.side || 'front'}</span>
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()}
+
+              {(viewContact.industry || viewContact.seniorityLevel || viewContact.leadPriority || viewContact.city) && (
+                <div className="ai-panel">
+                  <h4><i className="fas fa-wand-magic-sparkles"></i> AI insights</h4>
+                  {viewContact.aiSummary && <p className="ai-summary">{viewContact.aiSummary}</p>}
+                  <dl className="ai-grid">
+                    {viewContact.industry && <div><dt>Industry</dt><dd>{viewContact.industry}</dd></div>}
+                    {viewContact.designationCategory && <div><dt>Designation</dt><dd>{viewContact.designationCategory}</dd></div>}
+                    {viewContact.seniorityLevel && <div><dt>Seniority</dt><dd>{viewContact.seniorityLevel}</dd></div>}
+                    {viewContact.department && <div><dt>Department</dt><dd>{viewContact.department}</dd></div>}
+                    {(viewContact.city || viewContact.state) && (
+                      <div><dt>Location</dt><dd>{[viewContact.city, viewContact.state].filter(Boolean).join(', ')}</dd></div>
+                    )}
+                    {viewContact.leadPriority && (
+                      <div>
+                        <dt>Lead score</dt>
+                        <dd>
+                          <span className={`lead-badge ${viewContact.leadPriority.toLowerCase()}`}>
+                            {viewContact.leadPriority}
+                          </span>
+                          {viewContact.leadScore ? ` · ${viewContact.leadScore}/100` : ''}
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+                  {viewContact.tags?.length > 0 && (
+                    <div className="ai-tags">
+                      {viewContact.tags.map(tag => <span key={tag}>{tag}</span>)}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -2740,35 +2810,46 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Mobile Bottom Navigation Bar */}
-      <nav className="mobile-bottom-nav" aria-label="Quick navigation">
-        <button className={`mobile-nav-item ${activeTab === 'contacts' ? 'active' : ''}`} onClick={() => openContacts(false)} aria-label="Contacts">
-          <i className="fas fa-address-book"></i>
-          <span>Contacts</span>
-        </button>
-        <button className={`mobile-nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => openNavigationTab('projects')} aria-label="Projects and exhibitions">
-          <i className="fas fa-calendar-days"></i>
-          <span>Events</span>
-        </button>
-        <button
-          className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''} ${activeTab === 'scan' && cameraActive && !cameraStarting ? 'capture-ready' : ''}`}
-          onClick={() => (activeTab === 'scan' && cameraActive && !cameraStarting ? (twoSided ? captureSide() : captureForBackground()) : openNavigationTab('scan'))}
-          aria-label={activeTab === 'scan' && cameraActive && !cameraStarting ? 'Capture card' : 'Open card scanner'}
-        >
-          <div className="scan-btn-inner">
-            <i className="fas fa-camera"></i>
-          </div>
-          <span className="scan-nav-label">{activeTab === 'scan' && cameraActive && !cameraStarting ? 'Capture' : 'Scan'}</span>
-        </button>
-        <button className={`mobile-nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => openNavigationTab('media')} aria-label="Media gallery">
-          <i className="fas fa-photo-film"></i>
-          <span>Media</span>
-        </button>
-        <button className={`mobile-nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={() => openNavigationTab('profile')} aria-label="Profile">
-          <i className="fas fa-user-gear"></i>
-          <span>Profile</span>
-        </button>
-      </nav>
+      {/* Mobile Bottom Navigation Bar. On the scan tab with a live camera the
+          middle button becomes the shutter, so the thumb never has to travel. */}
+      {(() => {
+        const shutterLive = activeTab === 'scan' && cameraActive && !cameraStarting;
+        const shutterLabel = !shutterLive
+          ? 'Scan'
+          : captureMode === 'both' ? (pendingCard ? 'Back' : 'Front') : 'Capture';
+        return (
+          <nav className="mobile-bottom-nav" aria-label="Quick navigation">
+            <button type="button" className={`mobile-nav-item ${activeTab === 'contacts' ? 'active' : ''}`} onClick={() => openContacts(false)} aria-label="Contacts">
+              <i className="fas fa-address-book"></i>
+              <span>Contacts</span>
+            </button>
+            <button type="button" className={`mobile-nav-item ${activeTab === 'dashboard' ? 'active' : ''}`} onClick={() => openNavigationTab('dashboard')} aria-label="Dashboard">
+              <i className="fas fa-chart-line"></i>
+              <span>Dashboard</span>
+            </button>
+            <button
+              type="button"
+              className={`mobile-nav-item scan-btn ${activeTab === 'scan' ? 'active' : ''} ${shutterLive ? 'capture-ready' : ''}`}
+              onClick={() => (shutterLive ? (captureMode === 'both' ? captureSide() : captureForBackground()) : openNavigationTab('scan'))}
+              aria-label={shutterLive ? `Capture the ${shutterLabel.toLowerCase()}` : 'Open card scanner'}
+              disabled={shutterLive && sideBusy}
+            >
+              <div className="scan-btn-inner">
+                <i className={`fas ${shutterLive && sideBusy ? 'fa-spinner fa-spin' : 'fa-camera'}`}></i>
+              </div>
+              <span className="scan-nav-label">{shutterLabel}</span>
+            </button>
+            <button type="button" className={`mobile-nav-item ${activeTab === 'projects' ? 'active' : ''}`} onClick={() => openNavigationTab('projects')} aria-label="Projects and exhibitions">
+              <i className="fas fa-calendar-days"></i>
+              <span>Events</span>
+            </button>
+            <button type="button" className={`mobile-nav-item ${activeTab === 'media' ? 'active' : ''}`} onClick={() => openNavigationTab('media')} aria-label="Media gallery">
+              <i className="fas fa-photo-film"></i>
+              <span>Media</span>
+            </button>
+          </nav>
+        );
+      })()}
 
       {/* ============ MEDIA CREATE/EDIT MODAL ============ */}
       {mediaModal && (

@@ -34,18 +34,34 @@ export async function GET(req) {
       if (/^[=+\-@]/.test(safe)) safe = `'${safe}`;
       return `"${safe.replace(/"/g, '""')}"`;
     };
+    const sideUrl = (contact, side) =>
+      (contact.cardImages || []).find(img => img.side === side)?.url
+      || (side === 'front' ? contact.cardImage || '' : '');
+
     const headers = [
       'Contact ID', 'Name', 'Job Title', 'Company', 'Phone', 'Mobile', 'Email',
       'Website', 'Address', 'Notes', 'Project / Exhibition', 'Destination Type',
       'Event Date', 'Location', 'Favorite', 'Scan Method', 'Scan Cost (USD)',
-      'Captured At', 'Card Image URL',
+      'Captured At',
+      // AI enrichment
+      'Industry', 'Sub-Industry', 'Standardized Company', 'Designation Category',
+      'Department', 'Seniority', 'City', 'State', 'Country', 'Postal Code',
+      'Lead Priority', 'Lead Score', 'Data Completeness (%)', 'Tags', 'AI Summary',
+      'Times Scanned',
+      'Front Image URL', 'Back Image URL',
     ];
     const rows = contacts.map(c => [
       c._id, c.name, c.title, c.company, c.phone, c.mobile, c.email, c.website,
       c.address, c.notes, c.projectId?.name || '', c.projectId?.type || '',
       c.projectId?.eventDate ? new Date(c.projectId.eventDate).toISOString().slice(0, 10) : '',
       c.projectId?.location || '', c.favorite ? 'Yes' : 'No', c.scanMethod,
-      c.scanCost || 0, c.createdAt ? new Date(c.createdAt).toISOString() : '', c.cardImage,
+      c.scanCost || 0, c.createdAt ? new Date(c.createdAt).toISOString() : '',
+      c.industry || '', c.subIndustry || '', c.standardizedCompany || '',
+      c.designationCategory || '', c.department || '', c.seniorityLevel || '',
+      c.city || '', c.state || '', c.country || '', c.postalCode || '',
+      c.leadPriority || '', c.leadScore || 0, c.dataCompleteness || 0,
+      (c.tags || []).join('; '), c.aiSummary || '', c.scanCount || 1,
+      sideUrl(c, 'front'), sideUrl(c, 'back'),
     ].map(csvCell).join(','));
     const date = new Date().toISOString().slice(0, 10);
     const exportName = (selectedProject?.name || 'all-contacts')
