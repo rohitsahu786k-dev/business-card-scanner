@@ -1,7 +1,8 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { projectOnDoodle } from '@/lib/geo';
+import { projectOnDoodle, projectOnWorld } from '@/lib/geo';
 import { DOODLE_VIEW_BOX, INDIA_DOODLE_PATH } from '@/lib/india-map';
+import { WORLD_BOX, WORLD_LAND_PATH } from '@/lib/world-map';
 import { formatInr, formatUsd } from '@/lib/config';
 
 // Categorical hues, assigned in fixed order and never cycled. Validated for the
@@ -152,88 +153,135 @@ function BarList({ data, hue = HUE.brand, empty }) {
   );
 }
 
-// City bubbles on the hand-drawn India artwork. The affine in lib/geo.js was
-// fitted against real geometry, so a coastal city lands on the drawn coast.
-function IndiaMap({ points, states, onHover, onLeave }) {
+// Two views over the same contacts: the hand-drawn India artwork with a bubble
+// per city, and a world outline with a bubble per country. Both project through
+// lib/geo.js, so bubbles and outlines can never drift apart.
+//
+// India stays the default — it is where the contacts are — and the world tab is
+// how a contact outside India becomes visible at all.
+const VIEWS = {
+  india: {
+    label: 'India',
+    box: `${DOODLE_VIEW_BOX.x} ${DOODLE_VIEW_BOX.y} ${DOODLE_VIEW_BOX.width} ${DOODLE_VIEW_BOX.height}`,
+    path: INDIA_DOODLE_PATH,
+    project: projectOnDoodle,
+    // Radii are in each map's own units, so they scale with the artwork.
+    radius: (ratio) => 24 + Math.sqrt(ratio) * 92,
+    aria: 'Contacts by city across India',
+    heading: 'Top cities',
+    empty: 'No Indian locations resolved yet. Run AI enrichment so contacts get a city.',
+  },
+  world: {
+    label: 'World',
+    box: `0 0 ${WORLD_BOX.lngMax - WORLD_BOX.lngMin} ${WORLD_BOX.latMax - WORLD_BOX.latMin}`,
+    path: WORLD_LAND_PATH,
+    project: projectOnWorld,
+    radius: (ratio) => 1.6 + Math.sqrt(ratio) * 6,
+    aria: 'Contacts by country worldwide',
+    heading: 'By country',
+    empty: 'No countries resolved yet. Run AI enrichment so contacts get a country.',
+  },
+};
+
+function LocationMap({ cityPoints, countryPoints, states, outsideIndia, onHover, onLeave }) {
+  const [view, setView] = useState('india');
   const [active, setActive] = useState(null);
+
+  const config = VIEWS[view];
+  const points = view === 'india' ? cityPoints : countryPoints;
   const max = Math.max(...points.map(p => p.count), 1);
   // Biggest first so a small bubble is never buried under a large one.
   const ordered = [...points].sort((a, b) => b.count - a.count);
-  const box = DOODLE_VIEW_BOX;
-  // Radius in artwork units; area-proportional, floored so one contact still reads.
-  const radius = (count) => 24 + Math.sqrt(count / max) * 92;
+
+  const pick = (next) => { setView(next); setActive(null); onLeave(); };
 
   return (
-    <div className="dash-map">
-      <svg
-        viewBox={`${box.x} ${box.y} ${box.width} ${box.height}`}
-        className="dash-map-svg"
-        role="img"
-        aria-label="Contacts by location across India"
-        onMouseLeave={() => { setActive(null); onLeave(); }}
-      >
-        <path d={INDIA_DOODLE_PATH} className="dash-map-ink" />
-        {ordered.map((p) => {
-          const { x, y } = projectOnDoodle(p.lat, p.lng);
-          return (
-            <circle
-              key={`${p.label}-${p.lat}-${p.lng}`}
-              cx={x}
-              cy={y}
-              r={radius(p.count)}
-              className={`dash-map-bubble${active === p.label ? ' active' : ''}`}
-              onMouseMove={(event) => {
-                setActive(p.label);
-                onHover(event, {
-                  title: p.label,
-                  rows: [
-                    ['Contacts', fmtInt(p.count)],
-                    ['Companies', fmtInt(p.companies)],
-                    ['Decision makers', fmtInt(p.decisionMakers)],
-                  ],
-                });
-              }}
-            />
-          );
-        })}
-      </svg>
-
-      <div className="dash-map-side">
-        {points.length === 0 ? (
-          <>
-            <h4>Locations</h4>
-            <p className="dash-empty">No locations resolved yet. Run AI enrichment so contacts get a city.</p>
-          </>
-        ) : (
-          <>
-            <h4>Top locations</h4>
-            <ol className="dash-map-list">
-              {ordered.slice(0, 7).map((p) => (
-                <li
-                  key={p.label}
-                  className={active === p.label ? 'active' : ''}
-                  onMouseEnter={() => setActive(p.label)}
-                  onMouseLeave={() => setActive(null)}
-                >
-                  <span>{p.label}</span>
-                  <b>{fmtInt(p.count)}</b>
-                </li>
-              ))}
-            </ol>
-            {states.length > 0 && (
-              <>
-                <h4 className="dash-map-subhead">By state</h4>
-                <ol className="dash-map-list">
-                  {states.slice(0, 5).map((s) => (
-                    <li key={s.label}><span>{s.label}</span><b>{fmtInt(s.value)}</b></li>
-                  ))}
-                </ol>
-              </>
-            )}
-          </>
+    <>
+      <div className="dash-map-tabs" role="group" aria-label="Map view">
+        {Object.entries(VIEWS).map(([id, v]) => (
+          <button key={id} type="button" className={view === id ? 'active' : ''} onClick={() => pick(id)}>
+            {v.label}
+          </button>
+        ))}
+        {outsideIndia > 0 && view === 'india' && (
+          <span className="dash-map-note">
+            <i className="fas fa-circle-info" aria-hidden="true" />
+            {fmtInt(outsideIndia)} outside India — see World
+          </span>
         )}
       </div>
-    </div>
+
+      <div className={`dash-map view-${view}`}>
+        <svg
+          viewBox={config.box}
+          className="dash-map-svg"
+          role="img"
+          aria-label={config.aria}
+          onMouseLeave={() => { setActive(null); onLeave(); }}
+        >
+          <path d={config.path} className="dash-map-ink" />
+          {ordered.map((p) => {
+            const { x, y } = config.project(p.lat, p.lng);
+            return (
+              <circle
+                key={`${p.label}-${p.lat}-${p.lng}`}
+                cx={x}
+                cy={y}
+                r={config.radius(p.count / max)}
+                className={`dash-map-bubble${active === p.label ? ' active' : ''}`}
+                onMouseMove={(event) => {
+                  setActive(p.label);
+                  onHover(event, {
+                    title: p.label,
+                    rows: [
+                      ['Contacts', fmtInt(p.count)],
+                      ['Companies', fmtInt(p.companies)],
+                      ['Decision makers', fmtInt(p.decisionMakers)],
+                    ],
+                  });
+                }}
+              />
+            );
+          })}
+        </svg>
+
+        <div className="dash-map-side">
+          {points.length === 0 ? (
+            <>
+              <h4>{config.heading}</h4>
+              <p className="dash-empty">{config.empty}</p>
+            </>
+          ) : (
+            <>
+              <h4>{config.heading}</h4>
+              <ol className="dash-map-list">
+                {ordered.slice(0, 7).map((p) => (
+                  <li
+                    key={p.label}
+                    className={active === p.label ? 'active' : ''}
+                    onMouseEnter={() => setActive(p.label)}
+                    onMouseLeave={() => setActive(null)}
+                  >
+                    <span>{p.label}</span>
+                    <b>{fmtInt(p.count)}</b>
+                  </li>
+                ))}
+              </ol>
+              {view === 'india' && states.length > 0 && (
+                <>
+                  <h4 className="dash-map-subhead">By state</h4>
+                  <ol className="dash-map-list">
+                    {states.slice(0, 5).map((s) => (
+                      <li key={s.label}><span>{s.label}</span><b>{fmtInt(s.value)}</b></li>
+                    ))}
+                  </ol>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -405,7 +453,14 @@ export default function AnalyticsDashboard({ projectId, projectName }) {
 
             <section className="dash-card span-2 dash-card-map">
               <h3>Where contacts come from</h3>
-              <IndiaMap points={data.map || []} states={data.states || []} onHover={show} onLeave={hide} />
+              <LocationMap
+                cityPoints={data.map || []}
+                countryPoints={data.world || []}
+                states={data.states || []}
+                outsideIndia={data.outsideIndia || 0}
+                onHover={show}
+                onLeave={hide}
+              />
             </section>
 
             <section className="dash-card">
@@ -463,6 +518,7 @@ export default function AnalyticsDashboard({ projectId, projectName }) {
                 <tbody>
                   {[
                     ...data.scanMethods.map(d => ['Scan method', d.label, d.value]),
+                    ...(data.world || []).map(d => ['Country', d.label, d.count]),
                     ...(data.states || []).map(d => ['State', d.label, d.value]),
                     ...data.cities.map(d => ['City', d.label, d.value]),
                     ...data.industries.map(d => ['Industry', d.label, d.value]),

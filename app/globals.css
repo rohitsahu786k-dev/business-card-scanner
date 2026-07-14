@@ -1398,10 +1398,23 @@ input,textarea,select{font-family:inherit}
 /* India map: the hand-drawn doodle as a recessive base, data bubbles on top.
    Bubble radii and strokes are in the artwork's own units (viewBox ≈ 3500 wide),
    so they scale with the map instead of needing non-scaling-stroke. */
+.dash-map-tabs{display:flex;align-items:center;gap:8px;margin:-6px 0 14px}
+.dash-map-tabs button{border:1.5px solid var(--border);background:#fff;color:var(--text2);font-size:12px;font-weight:700;padding:6px 14px;border-radius:999px;cursor:pointer;transition:var(--transition)}
+.dash-map-tabs button:hover{border-color:var(--red);color:var(--red)}
+.dash-map-tabs button.active{background:var(--red-light);border-color:var(--red);color:var(--red)}
+.dash-map-note{display:inline-flex;align-items:center;gap:6px;margin-left:auto;font-size:11px;font-weight:600;color:var(--text2)}
+.dash-map-note i{color:#2563eb}
+
 .dash-card-map .dash-map{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap}
-.dash-map-svg{flex:1 1 280px;min-width:230px;max-width:400px;height:auto;max-height:440px}
+.dash-map-svg{flex:1 1 280px;min-width:230px;height:auto}
+.dash-map.view-india .dash-map-svg{max-width:400px;max-height:440px}
+/* The world map is ~2.5:1, so it gets the width instead of a height cap. */
+.dash-map.view-world .dash-map-svg{flex:1 1 100%;max-width:100%}
 .dash-map-ink{fill:#c3cbd8}
-.dash-map-bubble{fill:rgba(230,50,50,.55);stroke:#fff;stroke-width:10;cursor:pointer;transition:fill .15s}
+.dash-map.view-world .dash-map-ink{fill:#e7ebf1;stroke:#c3cbd8;stroke-width:.25}
+.dash-map-bubble{fill:rgba(230,50,50,.55);stroke:#fff;cursor:pointer;transition:fill .15s}
+.dash-map.view-india .dash-map-bubble{stroke-width:10}
+.dash-map.view-world .dash-map-bubble{stroke-width:.6}
 .dash-map-bubble:hover,.dash-map-bubble.active{fill:rgba(230,50,50,.9)}
 .dash-map-side{flex:1 1 190px;min-width:180px}
 .dash-map-side h4{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;color:var(--text2);margin-bottom:8px}

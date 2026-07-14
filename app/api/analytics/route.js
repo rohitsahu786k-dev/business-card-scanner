@@ -5,7 +5,7 @@ import { authOptions } from '@/app/api/auth/[...nextauth]/route';
 import dbConnect from '@/lib/mongodb';
 import Contact from '@/models/Contact';
 import Project from '@/models/Project';
-import { resolveCoordinates } from '@/lib/geo';
+import { resolveCoordinates, resolveCountry } from '@/lib/geo';
 
 export const dynamic = 'force-dynamic';
 
@@ -122,7 +122,17 @@ export async function GET(req) {
             { $limit: 8 },
           ],
           mapPoints: [
-            { $match: { $or: [{ city: { $nin: ['', null] } }, { state: { $nin: ['', null] } }] } },
+            // Country alone is enough to place a contact on the world map, even
+            // when the card printed no city or state.
+            {
+              $match: {
+                $or: [
+                  { city: { $nin: ['', null] } },
+                  { state: { $nin: ['', null] } },
+                  { country: { $nin: ['', null] } },
+                ],
+              },
+            },
             {
               $group: {
                 _id: { city: '$city', state: '$state', country: '$country' },
@@ -203,6 +213,29 @@ export async function GET(req) {
       .map(({ companySet, ...rest }) => ({ ...rest, companies: companySet.size }))
       .sort((a, b) => b.count - a.count);
 
+    // The same contacts rolled up to countries, for the world view. Contacts that
+    // fall outside India never appear on the India map, so without this they were
+    // simply invisible.
+    const byCountry = new Map();
+    for (const p of facet.mapPoints) {
+      const place = resolveCountry(p._id.city, p._id.state, p._id.country);
+      if (!place) continue;
+      let entry = byCountry.get(place.country);
+      if (!entry) {
+        entry = { label: place.country, lat: place.lat, lng: place.lng, count: 0, decisionMakers: 0, companySet: new Set() };
+        byCountry.set(place.country, entry);
+      }
+      entry.count += p.count;
+      entry.decisionMakers += p.decisionMakers;
+      p.companies.forEach((c) => { if (c) entry.companySet.add(c.toLowerCase()); });
+    }
+    const worldData = Array.from(byCountry.values())
+      .map(({ companySet, ...rest }) => ({ ...rest, companies: companySet.size }))
+      .sort((a, b) => b.count - a.count);
+    const outsideIndia = worldData
+      .filter(c => c.label !== 'India')
+      .reduce((sum, c) => sum + c.count, 0);
+
     // The aggregation only emits days that had captures. Fill the gaps so the
     // timeline is a real time axis (a quiet day reads as zero, not as absent).
     //
@@ -253,6 +286,8 @@ export async function GET(req) {
       states: facet.states.map(s => ({ label: s._id, value: s.count })),
       cities: facet.cities.map(c => ({ label: c._id, value: c.count })),
       map: mapData,
+      world: worldData,
+      outsideIndia,
       timeline: densifyTimeline(facet.timeline),
       enrichmentReady: kpis.industriesCovered > 0 || kpis.decisionMakers > 0,
       generatedAt: new Date().toISOString(),
