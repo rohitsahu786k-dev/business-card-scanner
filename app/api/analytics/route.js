@@ -5,7 +5,7 @@ import { authOptions } from '@/app/api/auth/[...nextauth]/route';
 import dbConnect from '@/lib/mongodb';
 import Contact from '@/models/Contact';
 import Project from '@/models/Project';
-import { resolveState } from '@/lib/geo';
+import { resolveCoordinates } from '@/lib/geo';
 
 export const dynamic = 'force-dynamic';
 
@@ -169,44 +169,38 @@ export async function GET(req) {
         : 0,
     };
 
-    // Roll the city/state groupings up to one point per STATE. The base map is a
-    // hand-drawn doodle whose coastline wanders, so only interior points (state
-    // centroids) can be placed reliably — see lib/geo.js. City detail survives in
-    // each state's `cities` list, which the tooltip shows.
-    const byState = new Map();
+    // Resolve each city/state grouping to coordinates (offline), then merge any
+    // that collapse onto the same point — e.g. two contacts whose city is unknown
+    // but whose state is the same both land on that state's centroid.
+    const merged = new Map();
     for (const p of facet.mapPoints) {
-      const place = resolveState(p._id.city, p._id.state, p._id.country);
-      if (!place) continue;
-      let entry = byState.get(place.state);
+      const coords = resolveCoordinates(p._id.city, p._id.state, p._id.country);
+      if (!coords) continue;
+      const key = `${coords.lat.toFixed(2)},${coords.lng.toFixed(2)}`;
+      const label = coords.level === 'city' && p._id.city
+        ? p._id.city
+        : (p._id.state || p._id.city || 'India');
+
+      let entry = merged.get(key);
       if (!entry) {
         entry = {
-          label: place.state,
-          lat: place.lat,
-          lng: place.lng,
+          label,
+          lat: coords.lat,
+          lng: coords.lng,
+          level: coords.level,
           count: 0,
           decisionMakers: 0,
           companySet: new Set(),
-          cityCounts: new Map(),
         };
-        byState.set(place.state, entry);
+        merged.set(key, entry);
       }
       entry.count += p.count;
       entry.decisionMakers += p.decisionMakers;
       p.companies.forEach((c) => { if (c) entry.companySet.add(c.toLowerCase()); });
-      if (p._id.city) {
-        entry.cityCounts.set(p._id.city, (entry.cityCounts.get(p._id.city) || 0) + p.count);
-      }
     }
 
-    const mapData = Array.from(byState.values())
-      .map(({ companySet, cityCounts, ...rest }) => ({
-        ...rest,
-        companies: companySet.size,
-        cities: Array.from(cityCounts.entries())
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 4)
-          .map(([name, value]) => ({ name, value })),
-      }))
+    const mapData = Array.from(merged.values())
+      .map(({ companySet, ...rest }) => ({ ...rest, companies: companySet.size }))
       .sort((a, b) => b.count - a.count);
 
     // The aggregation only emits days that had captures. Fill the gaps so the

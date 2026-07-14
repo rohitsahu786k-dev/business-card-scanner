@@ -152,27 +152,16 @@ function BarList({ data, hue = HUE.brand, empty }) {
   );
 }
 
-// One bubble per state, drawn on the hand-drawn India artwork. Bubbles sit at
-// state centroids because the doodle's coastline is not survey-accurate — see
-// the note on projectOnDoodle() in lib/geo.js before changing this to cities.
-function IndiaMap({ points, cities, onHover, onLeave }) {
+// City bubbles on the hand-drawn India artwork. The affine in lib/geo.js was
+// fitted against real geometry, so a coastal city lands on the drawn coast.
+function IndiaMap({ points, states, onHover, onLeave }) {
   const [active, setActive] = useState(null);
   const max = Math.max(...points.map(p => p.count), 1);
   // Biggest first so a small bubble is never buried under a large one.
   const ordered = [...points].sort((a, b) => b.count - a.count);
   const box = DOODLE_VIEW_BOX;
   // Radius in artwork units; area-proportional, floored so one contact still reads.
-  const radius = (count) => 26 + Math.sqrt(count / max) * 104;
-
-  const tip = (p) => ({
-    title: p.label,
-    rows: [
-      ['Contacts', fmtInt(p.count)],
-      ['Companies', fmtInt(p.companies)],
-      ['Decision makers', fmtInt(p.decisionMakers)],
-      ...(p.cities || []).map(c => [c.name, fmtInt(c.value)]),
-    ],
-  });
+  const radius = (count) => 24 + Math.sqrt(count / max) * 92;
 
   return (
     <div className="dash-map">
@@ -180,7 +169,7 @@ function IndiaMap({ points, cities, onHover, onLeave }) {
         viewBox={`${box.x} ${box.y} ${box.width} ${box.height}`}
         className="dash-map-svg"
         role="img"
-        aria-label="Contacts by state across India"
+        aria-label="Contacts by location across India"
         onMouseLeave={() => { setActive(null); onLeave(); }}
       >
         <path d={INDIA_DOODLE_PATH} className="dash-map-ink" />
@@ -188,12 +177,22 @@ function IndiaMap({ points, cities, onHover, onLeave }) {
           const { x, y } = projectOnDoodle(p.lat, p.lng);
           return (
             <circle
-              key={p.label}
+              key={`${p.label}-${p.lat}-${p.lng}`}
               cx={x}
               cy={y}
               r={radius(p.count)}
               className={`dash-map-bubble${active === p.label ? ' active' : ''}`}
-              onMouseMove={(event) => { setActive(p.label); onHover(event, tip(p)); }}
+              onMouseMove={(event) => {
+                setActive(p.label);
+                onHover(event, {
+                  title: p.label,
+                  rows: [
+                    ['Contacts', fmtInt(p.count)],
+                    ['Companies', fmtInt(p.companies)],
+                    ['Decision makers', fmtInt(p.decisionMakers)],
+                  ],
+                });
+              }}
             />
           );
         })}
@@ -202,14 +201,14 @@ function IndiaMap({ points, cities, onHover, onLeave }) {
       <div className="dash-map-side">
         {points.length === 0 ? (
           <>
-            <h4>States</h4>
-            <p className="dash-empty">No locations resolved yet. Run AI enrichment so contacts get a city and state.</p>
+            <h4>Locations</h4>
+            <p className="dash-empty">No locations resolved yet. Run AI enrichment so contacts get a city.</p>
           </>
         ) : (
           <>
-            <h4>By state</h4>
+            <h4>Top locations</h4>
             <ol className="dash-map-list">
-              {ordered.slice(0, 6).map((p) => (
+              {ordered.slice(0, 7).map((p) => (
                 <li
                   key={p.label}
                   className={active === p.label ? 'active' : ''}
@@ -221,12 +220,12 @@ function IndiaMap({ points, cities, onHover, onLeave }) {
                 </li>
               ))}
             </ol>
-            {cities.length > 0 && (
+            {states.length > 0 && (
               <>
-                <h4 className="dash-map-subhead">Top cities</h4>
+                <h4 className="dash-map-subhead">By state</h4>
                 <ol className="dash-map-list">
-                  {cities.slice(0, 6).map((c) => (
-                    <li key={c.label}><span>{c.label}</span><b>{fmtInt(c.value)}</b></li>
+                  {states.slice(0, 5).map((s) => (
+                    <li key={s.label}><span>{s.label}</span><b>{fmtInt(s.value)}</b></li>
                   ))}
                 </ol>
               </>
@@ -406,7 +405,7 @@ export default function AnalyticsDashboard({ projectId, projectName }) {
 
             <section className="dash-card span-2 dash-card-map">
               <h3>Where contacts come from</h3>
-              <IndiaMap points={data.map || []} cities={data.cities || []} onHover={show} onLeave={hide} />
+              <IndiaMap points={data.map || []} states={data.states || []} onHover={show} onLeave={hide} />
             </section>
 
             <section className="dash-card">
@@ -464,7 +463,7 @@ export default function AnalyticsDashboard({ projectId, projectName }) {
                 <tbody>
                   {[
                     ...data.scanMethods.map(d => ['Scan method', d.label, d.value]),
-                    ...(data.map || []).map(d => ['State', d.label, d.count]),
+                    ...(data.states || []).map(d => ['State', d.label, d.value]),
                     ...data.cities.map(d => ['City', d.label, d.value]),
                     ...data.industries.map(d => ['Industry', d.label, d.value]),
                     ...data.seniority.map(d => ['Seniority', d.label, d.value]),
