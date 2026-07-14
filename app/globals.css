@@ -1395,16 +1395,19 @@ input,textarea,select{font-family:inherit}
 .dash-bar-fill{display:block;height:100%;border-radius:5px;min-width:3px}
 .dash-bar-value{flex:none;font-size:12px;font-weight:800;color:var(--text2);min-width:26px;text-align:right}
 
-/* India map: recessive geography, data on top. */
+/* India map: the hand-drawn doodle as a recessive base, data bubbles on top.
+   Bubble radii and strokes are in the artwork's own units (viewBox ≈ 3500 wide),
+   so they scale with the map instead of needing non-scaling-stroke. */
 .dash-card-map .dash-map{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap}
-.dash-map-svg{flex:1 1 260px;min-width:220px;max-width:420px;height:auto;max-height:420px}
-.dash-map-state{fill:#eff2f7;stroke:#d5dce6;stroke-width:.6}
-.dash-map-bubble{fill:rgba(230,50,50,.5);stroke:#fff;stroke-width:1.5;cursor:pointer;transition:fill .15s}
-.dash-map-bubble:hover,.dash-map-bubble.active{fill:rgba(230,50,50,.85)}
+.dash-map-svg{flex:1 1 280px;min-width:230px;max-width:400px;height:auto;max-height:440px}
+.dash-map-ink{fill:#c3cbd8}
+.dash-map-bubble{fill:rgba(230,50,50,.55);stroke:#fff;stroke-width:10;cursor:pointer;transition:fill .15s}
+.dash-map-bubble:hover,.dash-map-bubble.active{fill:rgba(230,50,50,.9)}
 .dash-map-side{flex:1 1 190px;min-width:180px}
-.dash-map-side h4{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;color:var(--text2);margin-bottom:10px}
-.dash-map-list{list-style:none;counter-reset:loc}
-.dash-map-list li{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:12.5px;font-weight:600;color:var(--text2);padding:7px 8px;border-radius:8px}
+.dash-map-side h4{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;color:var(--text2);margin-bottom:8px}
+.dash-map-subhead{margin-top:16px}
+.dash-map-list{list-style:none}
+.dash-map-list li{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:12.5px;font-weight:600;color:var(--text2);padding:6px 8px;border-radius:8px}
 .dash-map-list li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dash-map-list li b{color:var(--text);font-weight:800;flex:none}
 .dash-map-list li.active{background:var(--red-light);color:var(--red)}

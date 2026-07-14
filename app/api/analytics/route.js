@@ -5,7 +5,7 @@ import { authOptions } from '@/app/api/auth/[...nextauth]/route';
 import dbConnect from '@/lib/mongodb';
 import Contact from '@/models/Contact';
 import Project from '@/models/Project';
-import { resolveCoordinates } from '@/lib/geo';
+import { resolveState } from '@/lib/geo';
 
 export const dynamic = 'force-dynamic';
 
@@ -104,6 +104,11 @@ export async function GET(req) {
             { $group: { _id: '$designationCategory', count: { $sum: 1 } } },
             { $sort: { count: -1 } },
           ],
+          departments: [
+            { $match: { department: { $nin: ['', null] } } },
+            { $group: { _id: '$department', count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+          ],
           states: [
             { $match: { state: { $nin: ['', null] } } },
             { $group: { _id: '$state', count: { $sum: 1 } } },
@@ -164,27 +169,44 @@ export async function GET(req) {
         : 0,
     };
 
-    // Resolve each city/state grouping to coordinates (offline). Merge points
-    // that collapse onto the same coordinate (e.g. unknown city → state centroid).
-    const mapMerge = new Map();
+    // Roll the city/state groupings up to one point per STATE. The base map is a
+    // hand-drawn doodle whose coastline wanders, so only interior points (state
+    // centroids) can be placed reliably — see lib/geo.js. City detail survives in
+    // each state's `cities` list, which the tooltip shows.
+    const byState = new Map();
     for (const p of facet.mapPoints) {
-      const coords = resolveCoordinates(p._id.city, p._id.state, p._id.country);
-      if (!coords) continue;
-      const key = `${coords.lat.toFixed(2)},${coords.lng.toFixed(2)}`;
-      const label = coords.level === 'city' && p._id.city ? p._id.city : (p._id.state || p._id.city || 'India');
-      const existing = mapMerge.get(key);
-      if (existing) {
-        existing.count += p.count;
-        existing.decisionMakers += p.decisionMakers;
-        p.companies.forEach(c => { if (c) existing.companySet.add(c.toLowerCase()); });
-      } else {
-        const companySet = new Set();
-        p.companies.forEach(c => { if (c) companySet.add(c.toLowerCase()); });
-        mapMerge.set(key, { label, lat: coords.lat, lng: coords.lng, level: coords.level, count: p.count, decisionMakers: p.decisionMakers, companySet });
+      const place = resolveState(p._id.city, p._id.state, p._id.country);
+      if (!place) continue;
+      let entry = byState.get(place.state);
+      if (!entry) {
+        entry = {
+          label: place.state,
+          lat: place.lat,
+          lng: place.lng,
+          count: 0,
+          decisionMakers: 0,
+          companySet: new Set(),
+          cityCounts: new Map(),
+        };
+        byState.set(place.state, entry);
+      }
+      entry.count += p.count;
+      entry.decisionMakers += p.decisionMakers;
+      p.companies.forEach((c) => { if (c) entry.companySet.add(c.toLowerCase()); });
+      if (p._id.city) {
+        entry.cityCounts.set(p._id.city, (entry.cityCounts.get(p._id.city) || 0) + p.count);
       }
     }
-    const mapData = Array.from(mapMerge.values())
-      .map(({ companySet, ...rest }) => ({ ...rest, companies: companySet.size }))
+
+    const mapData = Array.from(byState.values())
+      .map(({ companySet, cityCounts, ...rest }) => ({
+        ...rest,
+        companies: companySet.size,
+        cities: Array.from(cityCounts.entries())
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 4)
+          .map(([name, value]) => ({ name, value })),
+      }))
       .sort((a, b) => b.count - a.count);
 
     // The aggregation only emits days that had captures. Fill the gaps so the
@@ -233,6 +255,7 @@ export async function GET(req) {
       industries: facet.industries.map(i => ({ label: i._id, value: i.count })),
       seniority: facet.seniority.map(s => ({ label: s._id, value: s.count })),
       designations: facet.designations.map(d => ({ label: d._id, value: d.count })),
+      departments: facet.departments.map(d => ({ label: d._id, value: d.count })),
       states: facet.states.map(s => ({ label: s._id, value: s.count })),
       cities: facet.cities.map(c => ({ label: c._id, value: c.count })),
       map: mapData,
